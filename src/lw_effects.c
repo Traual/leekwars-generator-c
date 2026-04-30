@@ -513,3 +513,131 @@ int lw_apply_antidote(LwState *state, int target_idx) {
     LwEntity *target = &state->entities[target_idx];
     return lw_effect_clear_poisons(target);
 }
+
+
+int lw_apply_raw_buff_stat(LwState *state,
+                           int target_idx,
+                           int stat_index,
+                           double value1,
+                           double value2,
+                           double jet,
+                           double aoe,
+                           double critical_power) {
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    if (stat_index  < 0 || stat_index  >= LW_STAT_COUNT) return 0;
+    LwEntity *target = &state->entities[target_idx];
+
+    double v = (value1 + jet * value2) * aoe * critical_power;
+    int amount = java_round(v);
+    if (amount > 0) {
+        target->buff_stats[stat_index] += amount;
+    }
+    return amount > 0 ? amount : 0;
+}
+
+
+int lw_apply_vulnerability(LwState *state,
+                           int target_idx,
+                           double value1,
+                           double value2,
+                           double jet,
+                           double aoe,
+                           double critical_power) {
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *target = &state->entities[target_idx];
+
+    double v = (value1 + value2 * jet) * aoe * critical_power;
+    int amount = java_round(v);
+    if (amount > 0) {
+        target->buff_stats[LW_STAT_RELATIVE_SHIELD] -= amount;
+    }
+    return amount > 0 ? amount : 0;
+}
+
+
+int lw_apply_absolute_vulnerability(LwState *state,
+                                    int target_idx,
+                                    double value1,
+                                    double value2,
+                                    double jet,
+                                    double aoe,
+                                    double critical_power) {
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *target = &state->entities[target_idx];
+
+    double v = (value1 + value2 * jet) * aoe * critical_power;
+    int amount = java_round(v);
+    if (amount > 0) {
+        target->buff_stats[LW_STAT_ABSOLUTE_SHIELD] -= amount;
+    }
+    return amount > 0 ? amount : 0;
+}
+
+
+int lw_apply_kill(LwState *state, int caster_idx, int target_idx) {
+    /* EffectKill: hp -> 0 directly. No shields, no INVINCIBLE check
+     * (matches Python's commented-out branch). Returns life lost. */
+    (void)caster_idx;
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *target = &state->entities[target_idx];
+    if (!target->alive) return 0;
+
+    int lost = target->hp;
+    target->hp = 0;
+    target->alive = 0;
+    if (target->cell_id >= 0) {
+        state->map.entity_at_cell[target->cell_id] = -1;
+        target->cell_id = -1;
+    }
+    return lost;
+}
+
+
+int lw_apply_add_state(LwState *state, int target_idx, uint32_t state_flag) {
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *target = &state->entities[target_idx];
+    target->state_flags |= state_flag;
+    return 1;
+}
+
+
+int lw_apply_steal_absolute_shield(LwState *state,
+                                   int target_idx,
+                                   int previous_value) {
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    if (previous_value <= 0) return 0;
+    LwEntity *target = &state->entities[target_idx];
+    target->buff_stats[LW_STAT_ABSOLUTE_SHIELD] += previous_value;
+    return previous_value;
+}
+
+
+int lw_apply_remove_shackles(LwState *state, int target_idx) {
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *target = &state->entities[target_idx];
+
+    int removed = 0;
+    /* Walk back-to-front so removal indices stay valid. The shackle
+     * effect ids are consecutive in Python's enum but split across the
+     * range -- list them explicitly for clarity. */
+    for (int i = target->n_effects - 1; i >= 0; i--) {
+        int id = target->effects[i].id;
+        if (id == LW_EFFECT_SHACKLE_MP ||
+            id == LW_EFFECT_SHACKLE_TP ||
+            id == LW_EFFECT_SHACKLE_STRENGTH ||
+            id == LW_EFFECT_SHACKLE_MAGIC ||
+            id == LW_EFFECT_SHACKLE_AGILITY ||
+            id == LW_EFFECT_SHACKLE_WISDOM) {
+            lw_effect_remove(target, i);
+            removed++;
+        }
+    }
+    return removed;
+}

@@ -258,4 +258,84 @@ int lw_apply_total_debuff(LwState *state,
  * number of poisons cleared. */
 int lw_apply_antidote(LwState *state, int target_idx);
 
+/* ---------------- "raw" buffs (no caster stat scaling) ---------- */
+
+/*
+ * Generic "raw" buff: identical to lw_apply_buff_stat except there's
+ * no caster-stat scaling -- the formula is just
+ *   v = round((value1 + jet*value2) * aoe * critical_power)
+ * Used by EffectRawBuffStrength/Magic/Science/Agility/Resistance/
+ * Wisdom/MP/TP/Power and by EffectRawAbsoluteShield /
+ * EffectRawRelativeShield (any stat slot, all share the same shape).
+ *
+ * If v > 0: target.buff_stats[stat_index] += v.
+ */
+int lw_apply_raw_buff_stat(LwState *state,
+                           int target_idx,
+                           int stat_index,
+                           double value1,
+                           double value2,
+                           double jet,
+                           double aoe,
+                           double critical_power);
+
+/* ---------------- vulnerabilities (negative shields) ----------- */
+
+/*
+ * EffectVulnerability: writes a NEGATIVE delta to the relative shield
+ * slot. No caster-stat scaling. Returns the magnitude (positive).
+ */
+int lw_apply_vulnerability(LwState *state,
+                           int target_idx,
+                           double value1,
+                           double value2,
+                           double jet,
+                           double aoe,
+                           double critical_power);
+
+/*
+ * EffectAbsoluteVulnerability: same shape, writes to the absolute
+ * shield slot.
+ */
+int lw_apply_absolute_vulnerability(LwState *state,
+                                    int target_idx,
+                                    double value1,
+                                    double value2,
+                                    double jet,
+                                    double aoe,
+                                    double critical_power);
+
+/* ---------------- kill / add state / steal_absolute_shield ----- */
+
+/*
+ * EffectKill: instakill (target.hp = 0, alive = 0). Returns the HP
+ * that was lost (i.e. the target's life before the call). Bypasses
+ * shields and INVINCIBLE per the Python reference (Graal note in
+ * effect_kill.py).
+ */
+int lw_apply_kill(LwState *state, int caster_idx, int target_idx);
+
+/*
+ * EffectAddState: adds a state-flag bit to target.state_flags.
+ * Mirrors target.addState(state). The flag must be one of the
+ * LW_STATE_* constants from lw_types.h.
+ */
+int lw_apply_add_state(LwState *state, int target_idx, uint32_t state_flag);
+
+/*
+ * EffectStealAbsoluteShield: grants the target an absolute-shield
+ * buff equal to ``previous_value`` (the value computed by the previous
+ * effect in the chain, typically a damage roll).
+ */
+int lw_apply_steal_absolute_shield(LwState *state,
+                                   int target_idx,
+                                   int previous_value);
+
+/* ---------------- shackle cleanup ------------------------------ */
+
+/* EffectRemoveShackles: walks the target's effect list and removes
+ * every SHACKLE_* effect. buff_stats unwound automatically. Returns
+ * count removed. */
+int lw_apply_remove_shackles(LwState *state, int target_idx);
+
 #endif /* LW_EFFECTS_H */
