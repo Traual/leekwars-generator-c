@@ -20,6 +20,7 @@ int lw_apply_buff_stat(LwState *state,
                        int caster_idx,
                        int target_idx,
                        int stat_index,
+                       int scale_stat,
                        double value1,
                        double value2,
                        double jet,
@@ -28,23 +29,60 @@ int lw_apply_buff_stat(LwState *state,
     if (state == NULL) return 0;
     if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
     if (target_idx < 0 || target_idx >= state->n_entities) return 0;
-    if (stat_index < 0 || stat_index >= LW_STAT_COUNT) return 0;
+    if (stat_index  < 0 || stat_index  >= LW_STAT_COUNT) return 0;
+    if (scale_stat  < 0 || scale_stat  >= LW_STAT_COUNT) return 0;
     LwEntity *caster = &state->entities[caster_idx];
     LwEntity *target = &state->entities[target_idx];
 
-    int science = stat(caster, LW_STAT_SCIENCE);
-    /* NOTE: Python uses ``v1 + v2 * jet`` (same numeric outcome as
-     * ``v1 + jet * v2`` -- the multiplication is commutative -- but
-     * we keep the order for clarity / future proofing).
-     */
+    int scale = stat(caster, scale_stat);
     double v = (value1 + value2 * jet)
-             * (1.0 + (double)science / 100.0)
+             * (1.0 + (double)scale / 100.0)
              * aoe * critical_power;
     int amount = java_round(v);
     if (amount > 0) {
         target->buff_stats[stat_index] += amount;
     }
     return amount > 0 ? amount : 0;
+}
+
+
+int lw_apply_aftereffect(LwState *state,
+                          int caster_idx,
+                          int target_idx,
+                          double value1,
+                          double value2,
+                          double jet,
+                          double aoe,
+                          double critical_power) {
+    if (state == NULL) return 0;
+    if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *caster = &state->entities[caster_idx];
+    LwEntity *target = &state->entities[target_idx];
+    if (!target->alive) return 0;
+
+    int science = stat(caster, LW_STAT_SCIENCE);
+    double v = (value1 + value2 * jet)
+             * (1.0 + (double)science / 100.0)
+             * aoe * critical_power;
+    int amount = java_round(v);
+    if (amount < 0) amount = 0;
+
+    if (target->state_flags & LW_STATE_INVINCIBLE) amount = 0;
+    if (amount > target->hp) amount = target->hp;
+
+    if (amount > 0) {
+        target->hp -= amount;
+        if (target->hp <= 0) {
+            target->hp = 0;
+            target->alive = 0;
+            if (target->cell_id >= 0) {
+                state->map.entity_at_cell[target->cell_id] = -1;
+                target->cell_id = -1;
+            }
+        }
+    }
+    return amount;
 }
 
 

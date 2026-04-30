@@ -101,17 +101,101 @@ static int test_rel_shield(void) {
 
 
 static int test_buff_strength(void) {
-    /* (v1=30, v2=30, jet=0.5, science=100, aoe=1, crit=1)
-     * v = (30 + 30*0.5)(1 + 1) * 1 * 1 = 45 * 2 = 90.
+    /* Buff strength, science-scaled (EffectBuffStrength path).
+     * (v1=30, v2=30, jet=0.5, science=100, aoe=1, crit=1)
+     * v = (30 + 30*0.5)(1 + 100/100) * 1 * 1 = 45 * 2 = 90.
      */
     LwState *s = fresh_state();
     s->entities[0].base_stats[LW_STAT_SCIENCE] = 100;
-    int amt = lw_apply_buff_stat(s, 0, 1, LW_STAT_STRENGTH,
+    int amt = lw_apply_buff_stat(s, 0, 1,
+                                  LW_STAT_STRENGTH, LW_STAT_SCIENCE,
                                   30, 30, 0.5, 1.0, 1.0);
     int ok = (amt == 90 &&
               s->entities[1].buff_stats[LW_STAT_STRENGTH] == 90);
     if (!ok) printf("  buff_strength: amt=%d buff=%d expected 90 -> FAIL\n",
                     amt, s->entities[1].buff_stats[LW_STAT_STRENGTH]);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_buff_damage_return(void) {
+    /* DamageReturn is agility-scaled (EffectDamageReturn path).
+     * (v1=10, v2=10, jet=0.5, agility=200, aoe=1, crit=1)
+     * v = (10 + 10*0.5)(1 + 200/100)*1*1 = 15 * 3 = 45.
+     */
+    LwState *s = fresh_state();
+    s->entities[0].base_stats[LW_STAT_AGILITY] = 200;
+    int amt = lw_apply_buff_stat(s, 0, 1,
+                                  LW_STAT_DAMAGE_RETURN, LW_STAT_AGILITY,
+                                  10, 10, 0.5, 1.0, 1.0);
+    int ok = (amt == 45 &&
+              s->entities[1].buff_stats[LW_STAT_DAMAGE_RETURN] == 45);
+    if (!ok) printf("  buff_damage_return: amt=%d buff=%d expected 45 -> FAIL\n",
+                    amt, s->entities[1].buff_stats[LW_STAT_DAMAGE_RETURN]);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_buff_zero(void) {
+    /* When the rounded value is 0, we don't write anything. */
+    LwState *s = fresh_state();
+    /* science=0, v1=0, v2=0 -> v=0 -> amount=0. */
+    int amt = lw_apply_buff_stat(s, 0, 1,
+                                  LW_STAT_STRENGTH, LW_STAT_SCIENCE,
+                                  0, 0, 0.5, 1.0, 1.0);
+    int ok = (amt == 0 &&
+              s->entities[1].buff_stats[LW_STAT_STRENGTH] == 0);
+    if (!ok) printf("  buff_zero: amt=%d expected 0 -> FAIL\n", amt);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_aftereffect(void) {
+    /* Immediate damage path, science-scaled (EffectAftereffect.apply).
+     * (v1=40, v2=40, jet=0.5, science=100, aoe=1, crit=1)
+     * v = (40 + 40*0.5)(1 + 100/100)*1*1 = 60 * 2 = 120.
+     */
+    LwState *s = fresh_state();
+    s->entities[0].base_stats[LW_STAT_SCIENCE] = 100;
+    int dealt = lw_apply_aftereffect(s, 0, 1, 40, 40, 0.5, 1.0, 1.0);
+    int ok = (dealt == 120 && s->entities[1].hp == 880 &&
+              s->entities[1].alive);
+    if (!ok) printf("  aftereffect: dealt=%d hp=%d expected 120 880 -> FAIL\n",
+                    dealt, s->entities[1].hp);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_aftereffect_capped(void) {
+    /* Damage capped to remaining HP, kills target. */
+    LwState *s = fresh_state();
+    s->entities[0].base_stats[LW_STAT_SCIENCE] = 0;
+    s->entities[1].hp = 30;
+    int dealt = lw_apply_aftereffect(s, 0, 1, 40, 40, 0.5, 1.0, 1.0);
+    /* v = (40+20)*1 = 60 -> capped at 30 (remaining HP). */
+    int ok = (dealt == 30 && s->entities[1].hp == 0 &&
+              !s->entities[1].alive);
+    if (!ok) printf("  aftereffect_capped: dealt=%d hp=%d alive=%d -> FAIL\n",
+                    dealt, s->entities[1].hp, s->entities[1].alive);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_aftereffect_invincible(void) {
+    /* INVINCIBLE -> 0 damage, no HP change. */
+    LwState *s = fresh_state();
+    s->entities[0].base_stats[LW_STAT_SCIENCE] = 100;
+    s->entities[1].state_flags |= LW_STATE_INVINCIBLE;
+    int dealt = lw_apply_aftereffect(s, 0, 1, 40, 40, 0.5, 1.0, 1.0);
+    int ok = (dealt == 0 && s->entities[1].hp == 1000 &&
+              s->entities[1].alive);
+    if (!ok) printf("  aftereffect_invincible: dealt=%d hp=%d -> FAIL\n",
+                    dealt, s->entities[1].hp);
     lw_state_free(s);
     return ok;
 }
@@ -159,14 +243,19 @@ static int test_poison_invincible(void) {
 int main(void) {
     printf("test_effects_parity:\n");
     int n = 0, ok = 0;
-    n++; if (test_heal())                   { printf("   1  heal OK\n"); ok++; }
-    n++; if (test_heal_capped())            { printf("   2  heal_capped OK\n"); ok++; }
-    n++; if (test_heal_unhealable())        { printf("   3  heal_unhealable OK\n"); ok++; }
-    n++; if (test_abs_shield())             { printf("   4  abs_shield OK\n"); ok++; }
-    n++; if (test_rel_shield())             { printf("   5  rel_shield OK\n"); ok++; }
-    n++; if (test_buff_strength())          { printf("   6  buff_strength OK\n"); ok++; }
-    n++; if (test_poison_compute_and_tick()){ printf("   7  poison OK\n"); ok++; }
-    n++; if (test_poison_invincible())      { printf("   8  poison_invincible OK\n"); ok++; }
+    n++; if (test_heal())                    { printf("   1  heal OK\n"); ok++; }
+    n++; if (test_heal_capped())             { printf("   2  heal_capped OK\n"); ok++; }
+    n++; if (test_heal_unhealable())         { printf("   3  heal_unhealable OK\n"); ok++; }
+    n++; if (test_abs_shield())              { printf("   4  abs_shield OK\n"); ok++; }
+    n++; if (test_rel_shield())              { printf("   5  rel_shield OK\n"); ok++; }
+    n++; if (test_buff_strength())           { printf("   6  buff_strength OK\n"); ok++; }
+    n++; if (test_buff_damage_return())      { printf("   7  buff_damage_return OK\n"); ok++; }
+    n++; if (test_buff_zero())               { printf("   8  buff_zero OK\n"); ok++; }
+    n++; if (test_aftereffect())             { printf("   9  aftereffect OK\n"); ok++; }
+    n++; if (test_aftereffect_capped())      { printf("  10  aftereffect_capped OK\n"); ok++; }
+    n++; if (test_aftereffect_invincible())  { printf("  11  aftereffect_invincible OK\n"); ok++; }
+    n++; if (test_poison_compute_and_tick()) { printf("  12  poison OK\n"); ok++; }
+    n++; if (test_poison_invincible())       { printf("  13  poison_invincible OK\n"); ok++; }
     printf("\n%d/%d cases passed\n", ok, n);
     return ok == n ? 0 : 1;
 }

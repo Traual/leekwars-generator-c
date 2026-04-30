@@ -19,27 +19,48 @@
 
 /*
  * Generic stat buff. Used by:
- *   EffectBuffStrength, EffectBuffAgility, EffectBuffWisdom,
- *   EffectBuffMagic, EffectBuffScience, EffectBuffResistance,
- *   EffectBuffMP, EffectBuffTP
+ *   EffectBuffStrength / Agility / Wisdom / Magic / Resistance /
+ *   MP / TP -- all science-scaled (pass scale_stat=LW_STAT_SCIENCE).
+ *   EffectDamageReturn -- agility-scaled (LW_STAT_AGILITY).
  *
  * Formula matches Python:
  *   value = round((value1 + value2 * jet)
- *                 * (1 + caster.science / 100.0)
+ *                 * (1 + caster.<scale_stat> / 100.0)
  *                 * aoe * critical_power);
- *   if value > 0: target.buff_stats[stat] += value;
+ *   if value > 0: target.buff_stats[stat_index] += value;
  *
- * ``stat_index`` is one of LW_STAT_* (e.g. LW_STAT_STRENGTH).
+ * ``stat_index`` is the slot to write (LW_STAT_STRENGTH etc.).
+ * ``scale_stat`` is the caster stat that scales the magnitude.
  */
 int lw_apply_buff_stat(LwState *state,
                        int caster_idx,
                        int target_idx,
                        int stat_index,
+                       int scale_stat,
                        double value1,
                        double value2,
                        double jet,
                        double aoe,
                        double critical_power);
+
+/*
+ * Aftereffect: damage applied immediately on cast (like Damage but
+ * science-scaled instead of strength-scaled), then per-turn while
+ * active. Mirrors EffectAftereffect.apply (immediate part).
+ *
+ * NOTE: the per-turn tick is the same as direct damage tick (just
+ * subtract the precomputed value from HP). We expose the immediate
+ * apply here; the tick is deferred to the effect framework once we
+ * add multi-turn ticking.
+ */
+int lw_apply_aftereffect(LwState *state,
+                          int caster_idx,
+                          int target_idx,
+                          double value1,
+                          double value2,
+                          double jet,
+                          double aoe,
+                          double critical_power);
 
 /* ---------------- damage-over-time (poison) --------------------- */
 
