@@ -45,23 +45,89 @@ typedef struct {
     int     stats[LW_STAT_COUNT];
 } LwEffect;
 
-/* Effect type IDs (subset we encode explicitly; the engine uses many more) */
-#define LW_EFFECT_DAMAGE              1
-#define LW_EFFECT_HEAL                2
-#define LW_EFFECT_BUFF_STRENGTH       3
-#define LW_EFFECT_BUFF_AGILITY        4
-#define LW_EFFECT_RELATIVE_SHIELD     5
-#define LW_EFFECT_ABSOLUTE_SHIELD     6
-#define LW_EFFECT_BUFF_MP             7
-#define LW_EFFECT_TELEPORT           10
-#define LW_EFFECT_POISON             13
-#define LW_EFFECT_SUMMON             14
-#define LW_EFFECT_SHACKLE_MP         17
-#define LW_EFFECT_SHACKLE_TP         18
-#define LW_EFFECT_SHACKLE_STRENGTH   19
-#define LW_EFFECT_DAMAGE_RETURN      20
-#define LW_EFFECT_SHACKLE_MAGIC      24
-#define LW_EFFECT_SHACKLE_AGILITY    47
-#define LW_EFFECT_SHACKLE_WISDOM     48
+/* Effect type IDs (full catalog -- mirrors leekwars/effect/effect.py).
+ * The numeric values are part of the Java <-> Python <-> C wire format
+ * (they're stored in attack definitions, action log entries, etc.) so
+ * they MUST match Python exactly. */
+#define LW_EFFECT_DAMAGE                     1
+#define LW_EFFECT_HEAL                       2
+#define LW_EFFECT_BUFF_STRENGTH              3
+#define LW_EFFECT_BUFF_AGILITY               4
+#define LW_EFFECT_RELATIVE_SHIELD            5
+#define LW_EFFECT_ABSOLUTE_SHIELD            6
+#define LW_EFFECT_BUFF_MP                    7
+#define LW_EFFECT_BUFF_TP                    8
+#define LW_EFFECT_DEBUFF                     9
+#define LW_EFFECT_TELEPORT                  10
+#define LW_EFFECT_PERMUTATION               11
+#define LW_EFFECT_VITALITY                  12
+#define LW_EFFECT_POISON                    13
+#define LW_EFFECT_SUMMON                    14
+#define LW_EFFECT_RESURRECT                 15
+#define LW_EFFECT_KILL                      16
+#define LW_EFFECT_SHACKLE_MP                17
+#define LW_EFFECT_SHACKLE_TP                18
+#define LW_EFFECT_SHACKLE_STRENGTH          19
+#define LW_EFFECT_DAMAGE_RETURN             20
+#define LW_EFFECT_BUFF_RESISTANCE           21
+#define LW_EFFECT_BUFF_WISDOM               22
+#define LW_EFFECT_ANTIDOTE                  23
+#define LW_EFFECT_SHACKLE_MAGIC             24
+#define LW_EFFECT_AFTEREFFECT               25
+#define LW_EFFECT_VULNERABILITY             26
+#define LW_EFFECT_ABSOLUTE_VULNERABILITY    27
+#define LW_EFFECT_LIFE_DAMAGE               28
+#define LW_EFFECT_STEAL_ABSOLUTE_SHIELD     29
+#define LW_EFFECT_NOVA_DAMAGE               30
+#define LW_EFFECT_RAW_BUFF_MP               31
+#define LW_EFFECT_RAW_BUFF_TP               32
+#define LW_EFFECT_POISON_TO_SCIENCE         33
+#define LW_EFFECT_DAMAGE_TO_ABSOLUTE_SHIELD 34
+#define LW_EFFECT_DAMAGE_TO_STRENGTH        35
+#define LW_EFFECT_NOVA_DAMAGE_TO_MAGIC      36
+#define LW_EFFECT_RAW_ABSOLUTE_SHIELD       37
+#define LW_EFFECT_RAW_BUFF_STRENGTH         38
+#define LW_EFFECT_RAW_BUFF_MAGIC            39
+#define LW_EFFECT_RAW_BUFF_SCIENCE          40
+#define LW_EFFECT_RAW_BUFF_AGILITY          41
+#define LW_EFFECT_RAW_BUFF_RESISTANCE       42
+#define LW_EFFECT_PROPAGATION               43
+#define LW_EFFECT_RAW_BUFF_WISDOM           44
+#define LW_EFFECT_NOVA_VITALITY             45
+#define LW_EFFECT_ATTRACT                   46
+#define LW_EFFECT_SHACKLE_AGILITY           47
+#define LW_EFFECT_SHACKLE_WISDOM            48
+#define LW_EFFECT_REMOVE_SHACKLES           49
+#define LW_EFFECT_MOVED_TO_MP               50
+#define LW_EFFECT_PUSH                      51
+#define LW_EFFECT_RAW_BUFF_POWER            52
+#define LW_EFFECT_REPEL                     53
+#define LW_EFFECT_RAW_RELATIVE_SHIELD       54
+#define LW_EFFECT_ALLY_KILLED_TO_AGILITY    55
+#define LW_EFFECT_KILL_TO_TP                56
+#define LW_EFFECT_RAW_HEAL                  57
+#define LW_EFFECT_CRITICAL_TO_HEAL          58
+#define LW_EFFECT_ADD_STATE                 59
+#define LW_EFFECT_TOTAL_DEBUFF              60
+#define LW_EFFECT_STEAL_LIFE                61
+#define LW_EFFECT_MULTIPLY_STATS            62
+
+/* Target filter bits (matches Effect.TARGET_*). */
+#define LW_TARGET_ENEMIES       1
+#define LW_TARGET_ALLIES        2
+#define LW_TARGET_CASTER        4
+#define LW_TARGET_NON_SUMMONS   8
+#define LW_TARGET_SUMMONS      16
+
+/* Modifier bits (matches Effect.MODIFIER_*). */
+#define LW_MODIFIER_STACKABLE              1
+#define LW_MODIFIER_MULTIPLIED_BY_TARGETS  2
+#define LW_MODIFIER_ON_CASTER              4
+#define LW_MODIFIER_NOT_REPLACEABLE        8
+#define LW_MODIFIER_IRREDUCTIBLE          16
+
+/* Erosion rates (Effect.EROSION_DAMAGE / EROSION_POISON). */
+#define LW_EROSION_DAMAGE   0.05
+#define LW_EROSION_POISON   0.10
 
 #endif /* LW_EFFECT_H */
