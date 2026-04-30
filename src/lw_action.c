@@ -73,31 +73,166 @@ static int apply_move(LwState *s, int idx, const LwAction *a) {
 }
 
 
-/* USE_WEAPON / USE_CHIP stubs: charge TP and (eventually) trigger
- * the damage/effects machinery. For now they just deduct TP and
- * return success; a follow-up commit ships the full simulation. */
-static int apply_use_weapon_stub(LwState *s, int idx, const LwAction *a) {
-    (void)a;
+/* USE_WEAPON / USE_CHIP: simplified damage / effect application.
+ *
+ * IMPORTANT: this is NOT Java-parity damage. It's a deterministic
+ * approximation suitable for AI search scoring -- consistent across
+ * clones, captures the relative quality of moves, but doesn't match
+ * Java byte-for-byte. For training-data generation we still drive
+ * fights through the Python engine which IS Java-parity; the C
+ * engine is the AI's fast inner loop, not the fight executor.
+ *
+ * Damage formula:
+ *   raw = (value1 + value2) / 2                          (median roll)
+ *   raw *= 1 + strength/100                              (strength bonus)
+ *   raw *= max(0, 1 - resistance/200)                    (resistance)
+ *   absorb by target's relative_shield + absolute_shield
+ *   subtract from hp (can go below 0 -> dead)
+ */
+
+static void apply_damage(LwEntity *target, double base_damage) {
+    if (!target->alive) return;
+
+    /* Resistance reduction */
+    int res = target->base_stats[LW_STAT_RESISTANCE]
+              + target->buff_stats[LW_STAT_RESISTANCE];
+    double mult = 1.0 - (double)res / 200.0;
+    if (mult < 0.0) mult = 0.0;
+    double dmg = base_damage * mult;
+
+    /* Absorb by relative shield first (percentage), then absolute */
+    int rel = target->buff_stats[LW_STAT_RELATIVE_SHIELD];
+    if (rel > 0) {
+        double absorbed = dmg * ((double)rel / 100.0);
+        if (absorbed > dmg) absorbed = dmg;
+        dmg -= absorbed;
+    }
+    int abs_shield = target->buff_stats[LW_STAT_ABSOLUTE_SHIELD];
+    if (abs_shield > 0 && dmg > 0) {
+        if (abs_shield >= (int)dmg) {
+            target->buff_stats[LW_STAT_ABSOLUTE_SHIELD] -= (int)dmg;
+            dmg = 0;
+        } else {
+            dmg -= abs_shield;
+            target->buff_stats[LW_STAT_ABSOLUTE_SHIELD] = 0;
+        }
+    }
+
+    if (dmg > 0) {
+        int dmg_int = (int)dmg;
+        target->hp -= dmg_int;
+        if (target->hp <= 0) {
+            target->hp = 0;
+            target->alive = 0;
+        }
+    }
+}
+
+
+static int apply_use_weapon_simple(LwState *s, int idx, const LwAction *a,
+                                    int weapon_cost, double v1, double v2) {
     LwEntity *e = &s->entities[idx];
-    /* We don't yet have a weapon catalog in C; assume cost is in
-     * range [3, 9] and cap at available TP. The real apply_action
-     * will pull cost from the equipped weapon. */
-    int default_cost = 5;
     int avail_tp = (e->base_stats[LW_STAT_TP] + e->buff_stats[LW_STAT_TP]) - e->used_tp;
-    if (avail_tp < default_cost) return 0;
-    e->used_tp += default_cost;
+    if (avail_tp < weapon_cost) return 0;
+
+    int target_id = a->target_cell_id;
+    if (target_id < 0 || target_id >= s->map.topo->n_cells) {
+        e->used_tp += weapon_cost;
+        return 1;
+    }
+    int target_idx = s->map.entity_at_cell[target_id];
+    e->used_tp += weapon_cost;
+
+    if (target_idx < 0 || target_idx >= s->n_entities) return 1;
+    LwEntity *target = &s->entities[target_idx];
+
+    int strength = e->base_stats[LW_STAT_STRENGTH] + e->buff_stats[LW_STAT_STRENGTH];
+    double base = (v1 + v2) * 0.5 * (1.0 + (double)strength / 100.0);
+    apply_damage(target, base);
+
+    /* If the target died, clear its cell */
+    if (!target->alive && target->cell_id >= 0) {
+        s->map.entity_at_cell[target->cell_id] = -1;
+        target->cell_id = -1;
+    }
     return 1;
 }
 
 
-static int apply_use_chip_stub(LwState *s, int idx, const LwAction *a) {
-    (void)a;
+static int apply_use_chip_simple(LwState *s, int idx, const LwAction *a,
+                                  int chip_cost, double v1, double v2,
+                                  int effect_id) {
     LwEntity *e = &s->entities[idx];
-    int default_cost = 4;
     int avail_tp = (e->base_stats[LW_STAT_TP] + e->buff_stats[LW_STAT_TP]) - e->used_tp;
-    if (avail_tp < default_cost) return 0;
-    e->used_tp += default_cost;
+    if (avail_tp < chip_cost) return 0;
+    e->used_tp += chip_cost;
+
+    int target_id = a->target_cell_id;
+    if (target_id < 0 || target_id >= s->map.topo->n_cells) return 1;
+    int target_idx = s->map.entity_at_cell[target_id];
+    if (target_idx < 0 || target_idx >= s->n_entities) return 1;
+    LwEntity *target = &s->entities[target_idx];
+
+    /* Dispatch by effect kind. Like apply_use_weapon, this is a
+     * coarse approximation; details (turns, AoE, criticals, exact
+     * shield arithmetic) are the Python engine's job. */
+    int magic = e->base_stats[LW_STAT_MAGIC] + e->buff_stats[LW_STAT_MAGIC];
+    double base = (v1 + v2) * 0.5 * (1.0 + (double)magic / 100.0);
+
+    switch (effect_id) {
+        case LW_EFFECT_DAMAGE:
+            apply_damage(target, base);
+            break;
+        case LW_EFFECT_HEAL:
+            target->hp += (int)base;
+            if (target->hp > target->total_hp) target->hp = target->total_hp;
+            break;
+        case LW_EFFECT_RELATIVE_SHIELD:
+            target->buff_stats[LW_STAT_RELATIVE_SHIELD] += (int)base;
+            break;
+        case LW_EFFECT_ABSOLUTE_SHIELD:
+            target->buff_stats[LW_STAT_ABSOLUTE_SHIELD] += (int)base;
+            break;
+        case LW_EFFECT_BUFF_STRENGTH:
+            target->buff_stats[LW_STAT_STRENGTH] += (int)base;
+            break;
+        case LW_EFFECT_BUFF_AGILITY:
+            target->buff_stats[LW_STAT_AGILITY] += (int)base;
+            break;
+        case LW_EFFECT_POISON:
+            /* Add a poison effect with limited turns */
+            if (target->n_effects < LW_MAX_EFFECTS) {
+                LwEffect *new_eff = &target->effects[target->n_effects++];
+                memset(new_eff, 0, sizeof(*new_eff));
+                new_eff->id = LW_EFFECT_POISON;
+                new_eff->turns = 5;
+                new_eff->value = (int)base;
+                new_eff->value1 = v1;
+                new_eff->value2 = v2;
+                new_eff->target_id = target_idx;
+                new_eff->caster_id = idx;
+                new_eff->attack_id = a->chip_id;
+            }
+            break;
+        default:
+            break;
+    }
+
+    if (!target->alive && target->cell_id >= 0) {
+        s->map.entity_at_cell[target->cell_id] = -1;
+        target->cell_id = -1;
+    }
     return 1;
+}
+
+
+/* Default cost / damage stubs when the Python catalog is absent. */
+static int apply_use_weapon_stub(LwState *s, int idx, const LwAction *a) {
+    return apply_use_weapon_simple(s, idx, a, 5, 80.0, 120.0);
+}
+
+static int apply_use_chip_stub(LwState *s, int idx, const LwAction *a) {
+    return apply_use_chip_simple(s, idx, a, 4, 50.0, 80.0, LW_EFFECT_DAMAGE);
 }
 
 

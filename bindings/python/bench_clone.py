@@ -103,6 +103,21 @@ def main():
         by_type[a.type] += 1
     print(f"  breakdown by type: {by_type}")
 
+    print("\nDamage smoke test (USE_WEAPON):")
+    s = make_state()
+    print(f"  before: e0.hp={s.entity_hp(0)}  e1.hp={s.entity_hp(1)}")
+    fire = lwc.Action(type=lwc.ActionType.USE_WEAPON, target_cell_id=12)
+    ok = s.apply_action(0, fire)
+    print(f"  applied: {ok}  e1.hp={s.entity_hp(1)}  e1.alive={s.entity_alive(1)}")
+    # Hit until dead
+    n_hits = 1
+    while s.entity_alive(1) and n_hits < 50:
+        s.apply_action(0, fire)
+        n_hits += 1
+        # Reset TP so we can keep firing
+        s._reset_tp_for_test() if hasattr(s, "_reset_tp_for_test") else None
+    print(f"  after {n_hits} hits: e1.hp={s.entity_hp(1)}  e1.alive={s.entity_alive(1)}")
+
     print("\nBenchmarks:")
     bench_clone()
     bench_legal()
