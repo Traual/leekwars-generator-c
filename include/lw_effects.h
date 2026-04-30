@@ -92,4 +92,170 @@ int lw_compute_poison_damage(const LwState *state,
  */
 int lw_tick_poison(LwState *state, int target_idx, int per_turn_damage);
 
+/* Tick path for aftereffect (per-turn re-deal of stored value).
+ * Mirrors ``EffectAftereffect.applyStartTurn``. Caps to remaining HP.
+ * Returns dealt damage. */
+int lw_tick_aftereffect(LwState *state, int target_idx, int per_turn_damage);
+
+/* Tick path for multi-turn heal. Mirrors EffectHeal.applyStartTurn:
+ * caps to missing HP, UNHEALABLE -> 0. Returns healed amount. */
+int lw_tick_heal(LwState *state, int target_idx, int per_turn_heal);
+
+/* ---------------- shackles (magic-scaled debuffs) --------------- */
+
+/*
+ * Generic shackle effect. Used by EffectShackleMP/TP/Strength/Magic/
+ * Agility/Wisdom -- formula identical, only the target stat slot
+ * differs. Magic is clamped at 0 (matches ``max(0, magic)`` in Python).
+ *
+ *   v = round((value1 + jet*value2)
+ *             * (1 + max(0, caster.magic) / 100)
+ *             * aoe * critical_power);
+ *   if v > 0: target.buff_stats[stat_index] -= v;
+ *
+ * Returns the magnitude of the debuff (always >= 0). Note: this is
+ * "buff_stats -= v" so it shows up as a negative buff.
+ */
+int lw_apply_shackle(LwState *state,
+                     int caster_idx,
+                     int target_idx,
+                     int stat_index,
+                     double value1,
+                     double value2,
+                     double jet,
+                     double aoe,
+                     double critical_power);
+
+/* ---------------- vitality / nova vitality ---------------------- */
+
+/*
+ * EffectVitality: wisdom-scaled, bumps target.total_hp AND target.hp by
+ * the same value. Returns the gained amount. Clamped at 0.
+ */
+int lw_apply_vitality(LwState *state,
+                      int caster_idx,
+                      int target_idx,
+                      double value1,
+                      double value2,
+                      double jet,
+                      double aoe,
+                      double critical_power);
+
+/*
+ * EffectNovaVitality: science-scaled, bumps target.total_hp ONLY.
+ * Current HP unchanged. Returns the gained amount.
+ */
+int lw_apply_nova_vitality(LwState *state,
+                           int caster_idx,
+                           int target_idx,
+                           double value1,
+                           double value2,
+                           double jet,
+                           double aoe,
+                           double critical_power);
+
+/* ---------------- raw heal / steal life ------------------------- */
+
+/*
+ * EffectRawHeal: heal without wisdom scaling. Capped at missing HP.
+ * UNHEALABLE -> 0.
+ */
+int lw_apply_raw_heal(LwState *state,
+                      int caster_idx,
+                      int target_idx,
+                      double value1,
+                      double value2,
+                      double jet,
+                      double aoe,
+                      double critical_power,
+                      int    target_count);
+
+/*
+ * EffectStealLife: heals target by ``previous_value`` (the amount
+ * dealt by the previous damage effect in the same chain). UNHEALABLE
+ * -> 0. Caps at missing HP.
+ */
+int lw_apply_steal_life(LwState *state,
+                        int target_idx,
+                        int previous_value);
+
+/* ---------------- nova damage / life damage --------------------- */
+
+/*
+ * EffectNovaDamage: science+power-scaled, but writes only to total_hp
+ * (current HP unchanged). Capped at total_hp - hp (i.e. the "missing
+ * HP gap" — total_hp can never drop below current hp this way).
+ * INVINCIBLE -> 0. Returns the amount applied.
+ */
+int lw_apply_nova_damage(LwState *state,
+                         int caster_idx,
+                         int target_idx,
+                         double value1,
+                         double value2,
+                         double jet,
+                         double aoe,
+                         double critical_power);
+
+/*
+ * EffectLifeDamage: damage scaled by a percentage of caster's CURRENT
+ * life. Goes through shields like normal damage. INVINCIBLE -> 0.
+ *
+ *   d = (value1 + jet*value2) / 100 * caster.life
+ *       * aoe * critical_power * (1 + caster.power/100)
+ *
+ * Plus damage-return reflect: if the target is not the caster and
+ * has DamageReturn buff, the caster takes round(d * dmg_return / 100)
+ * back (capped at caster's HP).
+ *
+ * Returns the damage dealt to the primary target (NOT including the
+ * reflected damage). The caster's hp is mutated in-place by reflect.
+ */
+int lw_apply_life_damage(LwState *state,
+                         int caster_idx,
+                         int target_idx,
+                         double value1,
+                         double value2,
+                         double jet,
+                         double aoe,
+                         double critical_power);
+
+/* ---------------- debuff / total debuff / antidote -------------- */
+
+/*
+ * EffectDebuff: reduce all reducible (non-IRREDUCTIBLE) effects on
+ * the target by ``percent`` (where the formula gives an amount that
+ * is interpreted as a percentage). The "value" computed is the raw
+ * percent number (0..100, possibly larger).
+ *
+ *   v = floor((value1 + jet*value2) * aoe * crit_power * target_count)
+ *   target.reduceEffects(v / 100.0, caster)
+ *
+ * Returns v (the raw percent value).
+ */
+int lw_apply_debuff(LwState *state,
+                    int caster_idx,
+                    int target_idx,
+                    double value1,
+                    double value2,
+                    double jet,
+                    double aoe,
+                    double critical_power,
+                    int    target_count);
+
+/* EffectTotalDebuff: same as Debuff but also strips irreductible
+ * buffs. */
+int lw_apply_total_debuff(LwState *state,
+                          int caster_idx,
+                          int target_idx,
+                          double value1,
+                          double value2,
+                          double jet,
+                          double aoe,
+                          double critical_power,
+                          int    target_count);
+
+/* EffectAntidote: removes every poison effect from the target. Returns
+ * number of poisons cleared. */
+int lw_apply_antidote(LwState *state, int target_idx);
+
 #endif /* LW_EFFECTS_H */
