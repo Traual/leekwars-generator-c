@@ -24,6 +24,7 @@
 #include "lw_damage.h"
 #include "lw_movement.h"
 #include "lw_critical.h"
+#include <math.h>
 
 
 /* Build an effect entry from the input + computed value, then add it

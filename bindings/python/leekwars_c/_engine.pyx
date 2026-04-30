@@ -149,6 +149,53 @@ cdef extern from "lw_features.h":
     void lw_extract_mlp(const LwState *state, int my_team, float *out)
 
 
+cdef extern from "lw_attack_apply.h":
+    ctypedef struct LwAttackEffectSpec:
+        int    type
+        double value1, value2
+        int    turns
+        int    targets_filter
+        int    modifiers
+
+    ctypedef struct LwAttackSpec:
+        int  attack_type
+        int  item_id
+        int  min_range, max_range
+        int  launch_type
+        int  area
+        int  needs_los
+        int  tp_cost
+        int  n_effects
+        LwAttackEffectSpec effects[8]
+
+    int lw_apply_attack_full(LwState *state,
+                             int caster_idx,
+                             int target_cell_id,
+                             const LwAttackSpec *attack)
+
+
+cdef extern from "lw_catalog.h":
+    int  lw_catalog_register(int item_id, const LwAttackSpec *spec)
+    void lw_catalog_clear()
+    int  lw_catalog_size()
+
+
+cdef extern from "lw_order.h":
+    void lw_compute_start_order(LwState *state)
+
+
+cdef extern from "lw_turn.h":
+    int lw_next_entity_turn(LwState *state)
+    int lw_entity_start_turn(LwState *state, int entity_idx)
+    int lw_entity_end_turn(LwState *state, int entity_idx)
+
+
+cdef extern from "lw_winner.h":
+    int LW_WIN_ONGOING
+    int LW_WIN_DRAW
+    int lw_compute_winner(const LwState *state, int draw_check_hp)
+
+
 # --- Python-side constants -------------------------------------------
 
 LW_MAX_INVENTORY = 6
@@ -279,6 +326,84 @@ cdef class InventoryProfile:
         self._p.chip_attacks[slot].value2 = value2
 
 
+# --- Attack spec + catalog API ---------------------------------------
+
+cdef class AttackSpec:
+    """Python view of an LwAttackSpec.
+
+    An attack is a (range, area, launch type, LoS) profile plus a list
+    of effects to apply on each target. Build one per weapon / chip and
+    register it with :func:`catalog_register` so apply_action's
+    USE_WEAPON / USE_CHIP branches can route through the byte-for-byte
+    pipeline.
+    """
+
+    cdef LwAttackSpec _s
+
+    def __cinit__(self, int item_id, int attack_type=1,
+                  int min_range=1, int max_range=1,
+                  int launch_type=1, int area=1,
+                  int needs_los=1, int tp_cost=0):
+        memset(&self._s, 0, sizeof(LwAttackSpec))
+        self._s.attack_type = attack_type
+        self._s.item_id = item_id
+        self._s.min_range = min_range
+        self._s.max_range = max_range
+        self._s.launch_type = launch_type
+        self._s.area = area
+        self._s.needs_los = needs_los
+        self._s.tp_cost = tp_cost
+        self._s.n_effects = 0
+
+    def add_effect(self, int type, double value1=0.0, double value2=0.0,
+                   int turns=0, int targets_filter=0, int modifiers=0):
+        """Append one EffectParameters slot. Up to 8 per attack."""
+        if self._s.n_effects >= 8:
+            raise OverflowError("attack effect slots full (max 8)")
+        cdef int i = self._s.n_effects
+        self._s.effects[i].type = type
+        self._s.effects[i].value1 = value1
+        self._s.effects[i].value2 = value2
+        self._s.effects[i].turns = turns
+        self._s.effects[i].targets_filter = targets_filter
+        self._s.effects[i].modifiers = modifiers
+        self._s.n_effects += 1
+        return self
+
+    @property
+    def item_id(self):
+        return self._s.item_id
+
+    @property
+    def n_effects(self):
+        return self._s.n_effects
+
+
+def catalog_register(AttackSpec spec):
+    """Register an attack spec by item id. Subsequent USE_WEAPON /
+    USE_CHIP actions referencing this item id will route through the
+    byte-for-byte pipeline."""
+    cdef int rc = lw_catalog_register(spec._s.item_id, &spec._s)
+    if rc != 0:
+        raise RuntimeError("catalog full or invalid spec")
+
+
+def catalog_clear():
+    """Wipe every registered attack spec. Mostly useful for tests."""
+    lw_catalog_clear()
+
+
+def catalog_size():
+    """Return the number of items currently registered."""
+    return lw_catalog_size()
+
+
+# --- Winner sentinels exposed to Python ------------------------------
+
+WIN_ONGOING = -1
+WIN_DRAW    = -2
+
+
 # --- State wrapper ----------------------------------------------------
 
 cdef class State:
@@ -399,6 +524,14 @@ cdef class State:
     def apply_action(self, int entity_index, Action action):
         return lw_apply_action(self._s, entity_index, &action._a) != 0
 
+    def apply_attack(self, int caster_idx, int target_cell_id,
+                     AttackSpec spec):
+        """Run the byte-for-byte attack pipeline directly with a spec
+        (skips the catalog lookup). Consumes 2 RNG draws (critical +
+        jet). Returns total damage dealt."""
+        return lw_apply_attack_full(self._s, caster_idx, target_cell_id,
+                                    &spec._s)
+
     def extract_mlp_features(self, int my_team, out):
         """Fill ``out`` (a 256-element float32 buffer, typically a numpy
         view) with the MLP feature vector. ``out`` must implement the
@@ -428,6 +561,73 @@ cdef class State:
 
     def entity_alive(self, int idx):
         return bool(self._s.entities[idx].alive)
+
+    def entity_used_tp(self, int idx):
+        return self._s.entities[idx].used_tp
+
+    def entity_used_mp(self, int idx):
+        return self._s.entities[idx].used_mp
+
+    def entity_n_effects(self, int idx):
+        return self._s.entities[idx].n_effects
+
+    # -- RNG management ----------------------------------------------
+
+    def set_seed(self, long long seed):
+        """Seed the engine RNG. Java-LCG signed 64-bit cast applied."""
+        self._s.rng_n = <unsigned long long><long long>seed
+        self._s.seed = <int>seed
+
+    @property
+    def rng_state(self):
+        return <unsigned long long>self._s.rng_n
+
+    @property
+    def turn(self):
+        return self._s.turn
+
+    @property
+    def order_index(self):
+        return self._s.order_index
+
+    @property
+    def n_in_order(self):
+        return self._s.n_in_order
+
+    @property
+    def initial_order(self):
+        return [self._s.initial_order[i] for i in range(self._s.n_in_order)]
+
+    # -- order + turn driver ----------------------------------------
+
+    def compute_start_order(self):
+        """Fill initial_order based on team frequencies. Consumes one
+        RNG draw per distinct team (matches Python StartOrder.compute)."""
+        lw_compute_start_order(self._s)
+
+    def next_entity_turn(self):
+        """Advance to the next alive entity in initial_order. Returns
+        the entity index (or -1 if no one is alive). Increments
+        ``self.turn`` and resets used_tp / used_mp on wrap-around."""
+        return lw_next_entity_turn(self._s)
+
+    def entity_start_turn(self, int entity_idx):
+        """Reset used_tp / used_mp on the entity then run start-of-turn
+        effect ticks (poison / aftereffect / heal). Returns net damage."""
+        return lw_entity_start_turn(self._s, entity_idx)
+
+    def entity_end_turn(self, int entity_idx):
+        """Decrement effect counters; remove expired (unwinds buff_stats).
+        Returns the number of effects that expired."""
+        return lw_entity_end_turn(self._s, entity_idx)
+
+    # -- winner --------------------------------------------------------
+
+    def compute_winner(self, bint draw_check_hp=False):
+        """Returns the winning team_id, WIN_ONGOING (-1) if 2+ teams
+        still alive (and no tiebreak requested), WIN_DRAW (-2) if no
+        team alive or HP tiebreak ended in a tie."""
+        return lw_compute_winner(self._s, 1 if draw_check_hp else 0)
 
 
 # --- Topology wrapper -------------------------------------------------
