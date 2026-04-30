@@ -139,6 +139,46 @@ def run_one_fight(seed: int) -> tuple[int, int, int]:
     return state.compute_winner(), turns, total_shots
 
 
+def test_multi_effect_chip():
+    """Exercise a chip with two effects (damage on enemies + relative-
+    shield buff on caster). The catalog dispatches both in order with
+    their per-effect target filter applied."""
+    EFFECT_RELATIVE_SHIELD = 5
+    TARGET_CASTER = 4
+
+    chip = AttackSpec(
+        item_id=42,
+        attack_type=2,        # chip
+        min_range=0, max_range=8,
+        launch_type=1,
+        area=1,               # SINGLE_CELL
+        needs_los=0,
+        tp_cost=3,
+    )
+    chip.add_effect(type=EFFECT_DAMAGE, value1=50, value2=0,
+                    targets_filter=TARGET_ENEMIES)
+    chip.add_effect(type=EFFECT_RELATIVE_SHIELD, value1=20, value2=0,
+                    turns=3, targets_filter=TARGET_CASTER)
+    catalog_register(chip)
+
+    state = make_state(42)
+    state.compute_start_order()
+
+    # Cast directly via apply_attack (no TP charge -- bypasses the
+    # action handler's catalog lookup, useful for unit-style tests).
+    own_cell = state.entity_cell(0)
+    state.apply_attack(0, own_cell, chip)
+
+    # Damage filter (TARGET_ENEMIES) sees only the caster on this cell
+    # -- caster is itself, so no damage. Shield filter (TARGET_CASTER)
+    # gives the caster a +20 relative shield with a 3-turn entry.
+    assert state.entity_n_effects(0) == 1, (
+        f"expected 1 entry on caster, got {state.entity_n_effects(0)}"
+    )
+    print(f"multi-effect chip OK (caster has {state.entity_n_effects(0)} "
+          f"active effect)")
+
+
 def main():
     populate_catalog()
     print(f"catalog_size = {catalog_size()}")
@@ -160,6 +200,8 @@ def main():
     dt = time.perf_counter() - t0
     print(f"\n{n} fights in {dt*1000:.1f} ms -> {dt*1e6/n:.0f} us/fight")
     print(f"team0 wins: {wins[0]}, team1 wins: {wins[1]}, draws: {wins[2]}")
+
+    test_multi_effect_chip()
 
     print("\nSelf-play smoke OK.")
 
