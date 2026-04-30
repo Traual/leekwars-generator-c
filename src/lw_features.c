@@ -36,7 +36,7 @@ static inline float safe_div(float a, float b) {
 /* ----- entity slot writer (32 floats) ----- */
 
 static void write_entity_slot32(const LwEntity *e, int my_team, float dist_to_me,
-                                float *out) {
+                                const LwTopology *topo, float *out) {
     /* Default to all zeros for absent / dead entities. */
     memset(out, 0, 32 * sizeof(float));
     if (e == NULL || !e->alive) return;
@@ -52,14 +52,9 @@ static void write_entity_slot32(const LwEntity *e, int my_team, float dist_to_me
     out[2] = safe_div((float)avail_tp, (float)(total_tp ? total_tp : 1));
     out[3] = safe_div((float)avail_mp, (float)(total_mp ? total_mp : 1));
     out[4] = safe_div((float)e->level, NORM_LEVEL);
-    /* x, y normalised: read cell coords (skip if no cell) */
-    if (e->cell_id >= 0 && e->cell_id < LW_MAX_CELLS) {
-        /* We need the cell to read x, y. Since we don't have the
-         * topology pointer here, encode 0 -- caller can post-fill
-         * if they want positional features. (Tactical positional
-         * info is in slot 240+.) */
-        /* Leaving 5, 6 as 0 for now; OK because tactical block
-         * carries the positional info beam search actually uses. */
+    if (e->cell_id >= 0 && e->cell_id < topo->n_cells) {
+        out[5] = safe_div((float)topo->cells[e->cell_id].x, NORM_RANGE * 3.0f);
+        out[6] = safe_div((float)topo->cells[e->cell_id].y, NORM_RANGE * 3.0f);
     }
     out[7] = 1.0f;  /* alive */
 
@@ -173,7 +168,7 @@ void lw_extract_mlp(const LwState *state, int my_team, float *out) {
     const LwEntity *me = &state->entities[me_idx];
 
     /* ----- 16..47 me slot ----- */
-    write_entity_slot32(me, my_team, 0.0f, out + 16);
+    write_entity_slot32(me, my_team, 0.0f, topo, out + 16);
 
     /* Allies (top 3 by FId, excluding me) */
     int ally_idx[3]    = { -1, -1, -1 };
@@ -254,14 +249,14 @@ void lw_extract_mlp(const LwState *state, int my_team, float *out) {
         float d = (a != NULL && a->cell_id >= 0 && me->cell_id >= 0)
             ? (float)manhattan_distance(topo, me->cell_id, a->cell_id)
             : 0.0f;
-        write_entity_slot32(a, my_team, d, out + 48 + i * 32);
+        write_entity_slot32(a, my_team, d, topo, out + 48 + i * 32);
     }
 
     /* ----- 144..239 enemy slots ----- */
     for (int i = 0; i < 3; i++) {
         const LwEntity *en = (enemy_idx[i] >= 0) ? &state->entities[enemy_idx[i]] : NULL;
         float d = (en != NULL) ? (float)enemy_dist[i] : 0.0f;
-        write_entity_slot32(en, my_team, d, out + 144 + i * 32);
+        write_entity_slot32(en, my_team, d, topo, out + 144 + i * 32);
     }
 
     /* ----- 240..255 tactical block ----- */
