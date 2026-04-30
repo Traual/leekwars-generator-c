@@ -2,11 +2,15 @@
  * lw_action.c -- apply_action implementations.
  *
  * Covers END, SET_WEAPON, and MOVE in full. USE_WEAPON / USE_CHIP
- * are stubs that charge TP only -- the damage/effects logic ships in
- * a follow-up commit.
+ * route through the byte-for-byte attack pipeline
+ * (lw_apply_attack_full) when the catalog has the item; otherwise
+ * fall back to the simplified deterministic damage formula used by
+ * the AI search.
  */
 
 #include "lw_action.h"
+#include "lw_attack_apply.h"
+#include "lw_catalog.h"
 #include <string.h>
 
 
@@ -236,6 +240,26 @@ static int apply_use_chip_stub(LwState *s, int idx, const LwAction *a) {
 }
 
 
+/* If the catalog has the item, run the byte-for-byte attack pipeline
+ * AND charge TP. Returns 1 on success (TP charged + effects applied),
+ * 0 if pipeline rejected (caller should fall back). */
+static int apply_use_via_catalog(LwState *s, int idx,
+                                 const LwAction *a, int item_id) {
+    const LwAttackSpec *spec = lw_catalog_get(item_id);
+    if (spec == NULL) return 0;
+
+    LwEntity *e = &s->entities[idx];
+    int avail_tp = (e->base_stats[LW_STAT_TP] + e->buff_stats[LW_STAT_TP]) - e->used_tp;
+    if (avail_tp < spec->tp_cost) return 0;
+
+    /* Run the byte-for-byte pipeline. It rolls critical + jet,
+     * enumerates the area, and applies all effects. */
+    lw_apply_attack_full(s, idx, a->target_cell_id, spec);
+    e->used_tp += spec->tp_cost;
+    return 1;
+}
+
+
 /* -------- public dispatch ------------------------------------------- */
 
 int lw_apply_action(LwState *state,
@@ -250,8 +274,21 @@ int lw_apply_action(LwState *state,
         case LW_ACTION_END:        return apply_end(state, entity_index, action);
         case LW_ACTION_SET_WEAPON: return apply_set_weapon(state, entity_index, action);
         case LW_ACTION_MOVE:       return apply_move(state, entity_index, action);
-        case LW_ACTION_USE_WEAPON: return apply_use_weapon_stub(state, entity_index, action);
-        case LW_ACTION_USE_CHIP:   return apply_use_chip_stub(state, entity_index, action);
+
+        case LW_ACTION_USE_WEAPON:
+            /* Prefer the catalog path (byte-for-byte parity); fall
+             * back to the deterministic stub when the item id isn't
+             * registered. The stub keeps tests + AI search working
+             * even if the caller forgot to populate the catalog. */
+            if (apply_use_via_catalog(state, entity_index, action,
+                                       action->weapon_id)) return 1;
+            return apply_use_weapon_stub(state, entity_index, action);
+
+        case LW_ACTION_USE_CHIP:
+            if (apply_use_via_catalog(state, entity_index, action,
+                                       action->chip_id)) return 1;
+            return apply_use_chip_stub(state, entity_index, action);
+
         default:                   return 0;
     }
 }
