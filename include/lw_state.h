@@ -57,4 +57,8 @@ LwState* lw_state_alloc(void);
 void     lw_state_free(LwState *s);
 void     lw_state_clone(LwState *dst, const LwState *src);
 
+/* Drain the internal recycle pool. Optional; useful at shutdown to
+ * make leak-checkers happy. */
+void     lw_state_pool_drain(void);
+
 #endif /* LW_STATE_H */
