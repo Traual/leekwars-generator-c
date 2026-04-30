@@ -2,88 +2,102 @@
 
 This document tracks the work remaining to make the C engine
 byte-for-byte equivalent to the Java reference (and to the Python
-port that is already validated against Java). The current state
-covers structs, RNG, pathfinding, LoS, basic actions, and feature
-extraction; it does **not** yet cover damage, effects, turn loop, or
-action stream output.
+port that is already validated against Java).
 
-For AlphaZero-quality self-play, all of that must be ported.
+For AlphaZero-quality self-play, all of the runtime path must run
+in C — Python only for scenario loading and NN scoring.
 
 ## Scope summary
 
-| Layer | Lines (Python) | Status |
-|---|---|---|
-| Map / Cell / Topology | ~300 | ✅ done |
-| RNG | ~30 | ✅ done |
-| Pathfinding (A* / BFS) | ~200 | ✅ done |
-| Line of sight | ~80 | ✅ done |
-| Basic actions (END/SET_WEAPON/MOVE) | ~50 | ✅ done |
-| `legal_actions` enum | ~80 | ✅ done |
-| Feature extraction (MLP) | ~150 | ✅ done |
-| **Damage formula + criticals** | ~150 | ⚠️ approx only |
-| **Effect framework + types** | ~600 | ⚠️ partial (4 of ~30 types) |
-| **Stats arithmetic + erosion** | ~100 | ❌ TODO |
-| **AoE shapes (laser/circle/plus/X/first-in-line)** | ~250 | ❌ TODO |
-| **Turn loop (`Fight.startFight`)** | ~200 | ❌ TODO |
-| **Generator / scenario loading** | ~150 | ❌ TODO |
-| **Action stream output (JSON-equivalent)** | ~300 | ❌ TODO |
-| **Java parity gate (golden fixtures)** | n/a | ❌ TODO |
+| Layer | Lines (Python) | Status | Tests |
+|---|---|---|---|
+| Map / Cell / Topology | ~300 | ✅ done | — |
+| RNG (Java LCG) | ~30 | ✅ done | 6 |
+| Pathfinding (A* / BFS) | ~200 | ✅ done | — |
+| Line of sight | ~80 | ✅ done | — |
+| Basic actions (END/SET_WEAPON/MOVE) | ~50 | ✅ done | — |
+| `legal_actions` enum | ~80 | ✅ done | — |
+| Feature extraction (MLP) | ~150 | ✅ done | — |
+| Damage formula + criticals | ~150 | ✅ done | 16 |
+| Heal + Shields (abs/rel/raw) | ~100 | ✅ done | 4 |
+| Buffs (8 stats, science-scaled) | ~100 | ✅ done | 3 |
+| Raw buffs (9 stat slots, no scaling) | ~100 | ✅ done | 2 |
+| Shackles (6 stat slots, magic-scaled) | ~100 | ✅ done | 2 |
+| Vulnerabilities (negative shields) | ~50 | ✅ done | 2 |
+| Vitality / NovaVitality / RawHeal | ~80 | ✅ done | 6 |
+| NovaDamage / LifeDamage / Aftereffect | ~120 | ✅ done | 7 |
+| Poison + tick framework | ~100 | ✅ done | 4 |
+| Critical hit roll (agility/1000) | ~30 | ✅ done | 6 |
+| Effect-storage framework | ~150 | ✅ done | 9 |
+| Erosion (max-HP reduction) | ~50 | ✅ done | 6 |
+| Kill / AddState / StealAbsoluteShield | ~50 | ✅ done | 5 |
+| RemoveShackles / Antidote / MultiplyStats | ~80 | ✅ done | 5 |
+| Debuff / TotalDebuff (effect reducers) | ~50 | ✅ done | 2 |
+| Movement (Push/Attract/Slide/Teleport/Permutation) | ~100 | ✅ done | 9 |
+| AoE shapes (mask + dynamic) | ~250 | ✅ done | 18 |
+| Effect dispatcher (Effect.createEffect) | ~150 | ✅ done | 9 |
+| Attack pipeline (Attack.applyOnCell) | ~200 | ✅ done | 6 |
+| Turn driver (start/end + tick) | ~150 | ✅ done | 11 |
+| Round driver (next entity + reset) | ~50 | ✅ done | included |
+| Winner detection (alive teams + HP tiebreak) | ~30 | ✅ done | 9 |
+| Start order (StartOrder.compute) | ~80 | ✅ done | 4 |
+| **Action handler integration** | ~50 | ⏳ pending | — |
+| **Action stream output (JSON log)** | ~300 | ❌ TODO | — |
+| **Generator / scenario loading** | ~150 | ❌ TODO | — |
+| **Java parity gate (golden fixtures)** | n/a | ❌ TODO | — |
+| **Passive effects (POISON_TO_*, DAMAGE_TO_*, etc.)** | ~100 | ❌ TODO | — |
+| **Resurrect / Summon (entity allocation)** | ~80 | ❌ TODO | — |
 
-Total remaining: ~1750 lines of Python to port + tests.
+Test count: 20 binaries, ~150+ verified parity cases.
 
 ## Plan, week by week
 
-### Week 1: Core damage parity
+### Week 1: Core damage parity ✅
 
-Goal: a simple `weaponX -> entityY` use yields the same final HP as
-the Python engine.
+- ✅ Day 1: Effect base struct + Effect.createEffect skeleton.
+- ✅ Day 2: EffectDamage byte-for-byte.
+- ✅ Day 3: Heal + AbsoluteShield + RelativeShield.
+- ✅ Day 4: Buffs + Aftereffect + Poison.
+- ✅ Day 5: Critical hit roll + parity tests.
+- ✅ Day 6: Effect-storage framework.
+- ✅ Day 7: Vitality + Shackles + Debuffs etc. (13 more types).
+- ✅ Day 8: AoE shapes (11 mask + 4 dynamic).
+- ✅ Day 9: Erosion helper.
+- ✅ Day 10: Raw buffs / vulnerabilities / kill / etc. (8 more types).
 
-- Day 1: Effect base class in C + `Effect.createEffect` skeleton.
-- Day 2: `EffectDamage.apply` byte-for-byte (RNG roll, strength mult,
-  resistance, shields, erosion).
-- Day 3: `EffectHeal.apply` + `EffectAbsoluteShield.apply` +
-  `EffectRelativeShield.apply`.
-- Day 4: Critical hit factor application; `Entity.onCritical()`.
-- Day 5: Parity test harness — given a scenario JSON + sequence of
-  actions, compare final HP across all entities.
+### Week 2: Effect catalog + drivers ✅
 
-### Week 2: Full effects + AoE
+- ✅ Day 1: Movement effects (Push/Attract/Slide/Teleport/Permutation).
+- ✅ Day 2: Turn driver (start_turn tick + end_turn cleanup).
+- ✅ Day 3: Win-condition detection.
+- ✅ Day 4: Effect-creation wrapper (lw_effect_create dispatch).
+- ✅ Day 5: Multiply-stats + remaining catalog effects.
+- ✅ Day 6: Apply attack pipeline (lw_apply_attack_full).
+- ✅ Day 7: Start order + Round driver.
 
-- Day 1: AoE shapes (`Area.getArea`): SINGLE, CIRCLE_1/2/3, LASER,
-  PLUS_1/2/3, X_1/2.
-- Day 2: FIRST_IN_LINE area + LoS interaction.
-- Day 3: Effect ticking each turn (`Effect.tick` + `Effect.endTurn`).
-- Day 4: Buff effects (BUFF_STRENGTH / AGILITY / WISDOM / RES / etc.)
-  including stat-change side effects.
-- Day 5: Poison decay, damage erosion model.
+### Week 3: Action stream + parity gate ⏳
 
-### Week 3: Turn loop + parity gate
+- Day 1: Replace USE_WEAPON / USE_CHIP stubs in lw_action.c with the
+  byte-for-byte attack pipeline (catalog lookup + dispatch).
+- Day 2: Action-stream output (JSON-equivalent log lines that mirror
+  the Python engine's Generator.runScenario format).
+- Day 3: Generator.runScenario equivalent — load scenario JSON, drive
+  fight to completion, dump action stream.
+- Day 4: Java parity gate — replay 100 golden fights from
+  compare/compare_many.py, byte-for-byte match.
+- Day 5: Bisect any divergences; commit fixes.
 
-- Day 1: `Order` (initiative + turn rotation) in C.
-- Day 2: `Fight.startFight` / per-turn flow / win condition check.
-- Day 3: Action stream output (write the same JSON-shaped log lines
-  the Python engine emits).
-- Day 4: `Generator.runScenario` equivalent — load JSON, run, return
-  outcome.
-- Day 5: Wire Java parity gate. Use the existing `compare/compare_many.py`
-  fixtures: same seeds, same action streams, byte-for-byte match.
+### Week 4: AI integration + self-play ⏳
 
-### Week 4: AI integration + self-play
-
-- Day 1: Cython API for `runScenario` (Python loader feeds JSON to C,
-  gets full action stream back).
-- Day 2: Replace AI's beam_search to use the new C State end-to-end
-  (no Python state alongside).
-- Day 3: Self-play data-gen loop in pure C (calls back to Python only
-  for NN scoring).
-- Day 4: Bench: 10K farmer fights through C engine, compare to
-  current Python wallclock.
-- Day 5: Tune; commit benchmarks; ship.
+- Day 1: Cython API for runScenario (Python feeds JSON, gets stream).
+- Day 2: Replace AI's beam_search to use the C state end-to-end.
+- Day 3: Self-play data-gen loop in pure C.
+- Day 4: Bench: 10K farmer fights through C engine.
+- Day 5: Final benchmarks + tune + ship.
 
 ## Off-ramps
 
-If at any point the parity gate (Week 3 Day 5) reveals a stubborn
-divergence, two options:
+If the parity gate (Week 3 Day 4) reveals a stubborn divergence:
 
 1. **Hybrid mode**: keep the C inner loop (clone, legal_actions,
    features) but route action application through Python. Lose ~3-5x
@@ -107,4 +121,4 @@ Use this when working through a port:
 - [ ] Port to C with the same arithmetic order (matters for RNG sync).
 - [ ] Add a unit test against expected output from a Python prompt.
 - [ ] Bench the new path; flag if it's slower than the previous.
-- [ ] Update README status table.
+- [ ] Update this ROADMAP.md status table.
