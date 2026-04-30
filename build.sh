@@ -9,6 +9,15 @@ if ! command -v cmake >/dev/null; then
     exit 1
 fi
 
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+if command -v ninja >/dev/null; then
+    GEN="Ninja"
+elif command -v make >/dev/null; then
+    GEN="Unix Makefiles"
+else
+    echo "ERROR: need ninja or make. apt-get install ninja-build (or build-essential)"
+    exit 1
+fi
+
+cmake -S . -B build -G "$GEN" -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
