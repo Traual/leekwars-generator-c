@@ -1,52 +1,49 @@
 /*
- * lw_rng.h -- Linear-congruential RNG matching the Java engine.
+ * lw_rng.h -- LCG matching the Leek Wars engine's RandomGenerator.
  *
- * The Java side uses java.util.Random, which is a 48-bit LCG:
- *   n = (n * 0x5DEECE66DL + 0xBL) & 0xFFFFFFFFFFFFL
- *   getDouble() returns ((n >> 16) % 32768 + 32768) / 65536
+ * IMPORTANT: this is NOT java.util.Random. The Leek Wars engine uses
+ * its own LCG with the classic glibc rand() constants, kept identical
+ * across the Java/Python/C ports:
+ *   n  = (n * 1103515245 + 12345) in signed 64-bit (overflow wraps)
+ *   r  = (n / 65536) % 32768 + 32768           // truncating div
+ *   getDouble() = r / 65536.0
  *
- * Matched in the Python port at
- * leekwars/state/state.py:_DefaultRandom.
+ * Matched in the Python port at:
+ *   leekwars/state/state.py::_DefaultRandom
+ *   leekwars/util/java_math.py::{java_long, java_div, java_mod}
  *
- * We replicate the exact same arithmetic in C so identical seed +
- * call sequence yields identical bit pattern.
+ * In C99+, ``int64_t`` arithmetic wraps modulo 2^64 with two's
+ * complement, identical to Java ``long`` overflow. Truncating
+ * division and ``%`` with-sign-of-dividend match Java semantics.
  */
 #ifndef LW_RNG_H
 #define LW_RNG_H
 
 #include <stdint.h>
 
-#define LW_RNG_MULT  0x5DEECE66DULL
-#define LW_RNG_INC   0xBULL
-#define LW_RNG_MASK  0xFFFFFFFFFFFFULL
+#define LW_RNG_MULT  1103515245LL
+#define LW_RNG_ADD   12345LL
+#define LW_RNG_HALF  65536LL
+#define LW_RNG_MOD   32768LL
 
-static inline uint64_t lw_rng_advance(uint64_t *n) {
-    *n = ((*n) * LW_RNG_MULT + LW_RNG_INC) & LW_RNG_MASK;
-    return *n;
+static inline void lw_rng_advance(uint64_t *state) {
+    int64_t n = (int64_t)(*state);
+    n = n * LW_RNG_MULT + LW_RNG_ADD;
+    *state = (uint64_t)n;
 }
 
-/*
- * Match the Python ``getDouble()``:
- *   r = ((n >> 16) % 32768) + 32768
- *   return r / 65536.0
- *
- * Note this differs from Java's standard nextDouble (which uses two
- * advances and 53 bits) -- the engine intentionally replicates the
- * legacy LeekWars-Java behaviour.
- */
-static inline double lw_rng_double(uint64_t *n) {
-    lw_rng_advance(n);
-    int r = (int)(((*n) >> 16) % 32768) + 32768;
+static inline double lw_rng_double(uint64_t *state) {
+    lw_rng_advance(state);
+    int64_t n = (int64_t)(*state);
+    int64_t r = ((n / LW_RNG_HALF) % LW_RNG_MOD) + LW_RNG_MOD;
     return ((double)r) / 65536.0;
 }
 
 /*
- * Match the Python seed routine:
- *   _set_seed(seed):
- *       self.n = (seed ^ 0x5DEECE66DL) & ((1 << 48) - 1)
+ * Seed: ``self.n = java_long(seed)`` -- direct signed cast.
  */
-static inline void lw_rng_seed(uint64_t *n, int64_t seed) {
-    *n = ((uint64_t)seed ^ LW_RNG_MULT) & LW_RNG_MASK;
+static inline void lw_rng_seed(uint64_t *state, int64_t seed) {
+    *state = (uint64_t)seed;
 }
 
 #endif /* LW_RNG_H */
