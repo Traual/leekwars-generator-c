@@ -75,6 +75,21 @@ def bench_legal(n=10000):
           f"({n} iter in {dt:.2f}s, {len(actions)} actions/call)")
 
 
+def bench_features(n=100000):
+    import numpy as np
+    s = make_state()
+    buf = np.zeros(256, dtype=np.float32)
+    t0 = time.perf_counter()
+    for _ in range(n):
+        s.extract_mlp_features(0, buf)
+    dt = time.perf_counter() - t0
+    print(f"  extract_mlp (C):     {1e6 * dt / n:.2f} us/call "
+          f"({n} iter in {dt:.2f}s)")
+    # show a few values to confirm the buffer was actually filled
+    nz = int((buf != 0).sum())
+    print(f"     ({nz}/256 non-zero, first non-zero values: {buf[buf != 0][:5]})")
+
+
 def main():
     print("Smoke test:")
     s = make_state()
@@ -91,6 +106,7 @@ def main():
     print("\nBenchmarks:")
     bench_clone()
     bench_legal()
+    bench_features()
 
 
 if __name__ == "__main__":

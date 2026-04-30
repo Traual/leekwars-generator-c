@@ -144,6 +144,11 @@ cdef extern from "lw_legal.h":
                          int max_out)
 
 
+cdef extern from "lw_features.h":
+    int LW_MLP_FEAT_DIM
+    void lw_extract_mlp(const LwState *state, int my_team, float *out)
+
+
 # --- Python-side constants -------------------------------------------
 
 LW_MAX_INVENTORY = 6
@@ -365,6 +370,19 @@ cdef class State:
 
     def apply_action(self, int entity_index, Action action):
         return lw_apply_action(self._s, entity_index, &action._a) != 0
+
+    def extract_mlp_features(self, int my_team, out):
+        """Fill ``out`` (a 256-element float32 buffer, typically a numpy
+        view) with the MLP feature vector. ``out`` must implement the
+        Python buffer protocol with at least 256 floats writable.
+
+        Returns ``out`` unchanged for chaining.
+        """
+        cdef float[::1] view = out
+        if view.shape[0] < 256:
+            raise ValueError("out buffer must hold at least 256 float32")
+        lw_extract_mlp(self._s, my_team, &view[0])
+        return out
 
     # -- read-only accessors used by AI feature extraction ------------
 

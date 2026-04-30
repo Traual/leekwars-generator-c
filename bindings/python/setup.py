@@ -25,6 +25,7 @@ C_SOURCES = [
     os.path.join(ROOT, "src", "lw_los.c"),
     os.path.join(ROOT, "src", "lw_action.c"),
     os.path.join(ROOT, "src", "lw_legal.c"),
+    os.path.join(ROOT, "src", "lw_features.c"),
 ]
 
 INCLUDE_DIRS = [
