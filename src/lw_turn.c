@@ -63,3 +63,61 @@ int lw_turn_end_all(LwState *state) {
     }
     return total;
 }
+
+
+int lw_next_entity_turn(LwState *state) {
+    if (state == NULL) return -1;
+    if (state->n_in_order <= 0) return -1;
+
+    /* Walk forward up to n_in_order positions, looping if needed. We
+     * cap at n_in_order to avoid infinite loops when no one is alive. */
+    int start = state->order_index;
+    for (int step = 0; step < state->n_in_order; step++) {
+        int pos = state->order_index;
+        int eid = state->initial_order[pos];
+
+        /* Advance for next call. */
+        state->order_index = (pos + 1) % state->n_in_order;
+        /* If we wrapped around, that means the round just completed. */
+        if (state->order_index == 0 && pos != 0) {
+            state->turn++;
+            for (int i = 0; i < state->n_entities; i++) {
+                if (state->entities[i].alive) {
+                    state->entities[i].used_tp = 0;
+                    state->entities[i].used_mp = 0;
+                }
+            }
+        }
+
+        if (eid < 0 || eid >= state->n_entities) continue;
+        if (!state->entities[eid].alive) continue;
+        return eid;
+    }
+
+    /* Special case: order_index started at 0 and nothing alive in the
+     * full pass. Make the empty-pass count as a round if we fell off
+     * the loop without finding an alive entity (matches "everyone
+     * dead" -> fight ends, but Python's loop simply terminates). */
+    (void)start;
+    return -1;
+}
+
+
+int lw_entity_start_turn(LwState *state, int entity_idx) {
+    if (state == NULL) return 0;
+    if (entity_idx < 0 || entity_idx >= state->n_entities) return 0;
+    LwEntity *e = &state->entities[entity_idx];
+    if (!e->alive) return 0;
+
+    /* Reset used resources first (Python's Entity.startTurn does this
+     * before applying tick effects). */
+    e->used_tp = 0;
+    e->used_mp = 0;
+
+    return lw_turn_start(state, entity_idx);
+}
+
+
+int lw_entity_end_turn(LwState *state, int entity_idx) {
+    return lw_turn_end(state, entity_idx);
+}

@@ -49,4 +49,38 @@ int lw_turn_end(LwState *state, int entity_idx);
  */
 int lw_turn_end_all(LwState *state);
 
+/* ---------------- round driver ------------------------------- */
+
+/*
+ * Activate the next entity in initial_order. Returns the entity index
+ * (NOT the order position) that's now active, or -1 if no alive
+ * entity is left in the round.
+ *
+ * Skips dead entities. When the order rolls past the last position
+ * (i.e. a full round just completed), increments state->turn and
+ * resets used_tp/used_mp on every alive entity, mirroring how
+ * Fight.startNextEntityTurn behaves between rounds.
+ */
+int lw_next_entity_turn(LwState *state);
+
+/*
+ * Hook to call at the start of an entity's turn:
+ *   - resets used_tp / used_mp to 0
+ *   - runs lw_turn_start (poison / aftereffect / heal ticks)
+ * The reset happens BEFORE the tick so a heal on a hot ally
+ * actually heals (matches Python's order).
+ *
+ * Returns the net damage dealt by the start-of-turn ticks (positive
+ * = entity took damage, negative = entity gained HP).
+ */
+int lw_entity_start_turn(LwState *state, int entity_idx);
+
+/*
+ * Hook to call at the end of an entity's turn:
+ *   - runs lw_turn_end (decrement effect counters)
+ *
+ * Returns the number of effects that expired this call.
+ */
+int lw_entity_end_turn(LwState *state, int entity_idx);
+
 #endif /* LW_TURN_H */

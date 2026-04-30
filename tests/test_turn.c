@@ -172,6 +172,115 @@ static int test_end_turn_all_skips_dead(void) {
 }
 
 
+static int test_round_rotation(void) {
+    /* 3 entities, order [2, 0, 1]. First three calls return 2/0/1 in
+     * order. Fourth call wraps around -> increments turn, returns 2. */
+    LwState *s = lw_state_alloc();
+    s->n_entities = 3;
+    for (int i = 0; i < 3; i++) {
+        memset(&s->entities[i], 0, sizeof(LwEntity));
+        s->entities[i].id = i; s->entities[i].alive = 1;
+        s->entities[i].cell_id = -1;
+        s->entities[i].hp = 1000; s->entities[i].total_hp = 1000;
+    }
+    s->n_in_order = 3;
+    s->initial_order[0] = 2;
+    s->initial_order[1] = 0;
+    s->initial_order[2] = 1;
+    s->order_index = 0;
+    s->turn = 0;
+
+    int seq[6];
+    for (int i = 0; i < 6; i++) seq[i] = lw_next_entity_turn(s);
+    int ok = (seq[0] == 2 && seq[1] == 0 && seq[2] == 1 &&
+              seq[3] == 2 && seq[4] == 0 && seq[5] == 1 &&
+              s->turn == 2);
+    if (!ok) printf("  rotation: %d %d %d %d %d %d turn=%d -> FAIL\n",
+                    seq[0], seq[1], seq[2], seq[3], seq[4], seq[5], s->turn);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_round_skips_dead(void) {
+    /* Order [0, 1, 2]. Entity 1 is dead -> skipped.
+     * First call returns 0, second returns 2 (skipping 1), third
+     * wraps and returns 0 again. */
+    LwState *s = lw_state_alloc();
+    s->n_entities = 3;
+    for (int i = 0; i < 3; i++) {
+        memset(&s->entities[i], 0, sizeof(LwEntity));
+        s->entities[i].id = i; s->entities[i].cell_id = -1;
+        s->entities[i].alive = (i == 1) ? 0 : 1;
+    }
+    s->n_in_order = 3;
+    for (int i = 0; i < 3; i++) s->initial_order[i] = i;
+    s->order_index = 0;
+    s->turn = 0;
+
+    int a = lw_next_entity_turn(s);
+    int b = lw_next_entity_turn(s);
+    int c = lw_next_entity_turn(s);
+    int ok = (a == 0 && b == 2 && c == 0);
+    if (!ok) printf("  skips_dead: %d %d %d -> FAIL\n", a, b, c);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_round_resets_resources(void) {
+    /* When wrap-around happens, used_tp and used_mp reset to 0 on all
+     * alive entities. */
+    LwState *s = lw_state_alloc();
+    s->n_entities = 2;
+    for (int i = 0; i < 2; i++) {
+        memset(&s->entities[i], 0, sizeof(LwEntity));
+        s->entities[i].id = i; s->entities[i].alive = 1;
+        s->entities[i].cell_id = -1;
+        s->entities[i].used_tp = 5;
+        s->entities[i].used_mp = 3;
+    }
+    s->n_in_order = 2;
+    s->initial_order[0] = 0;
+    s->initial_order[1] = 1;
+    s->order_index = 0;
+
+    /* Two calls finish the round; third wraps. */
+    lw_next_entity_turn(s);
+    lw_next_entity_turn(s);
+    /* After this third call we should be at turn=1 with reset. */
+    lw_next_entity_turn(s);
+
+    int ok = (s->turn == 1 &&
+              s->entities[0].used_tp == 0 && s->entities[0].used_mp == 0 &&
+              s->entities[1].used_tp == 0 && s->entities[1].used_mp == 0);
+    if (!ok) printf("  resets: turn=%d used_tp=%d/%d -> FAIL\n",
+                    s->turn, s->entities[0].used_tp, s->entities[1].used_tp);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_entity_start_turn_resets_and_ticks(void) {
+    LwState *s = fresh_state();
+    s->entities[0].used_tp = 4;
+    s->entities[0].used_mp = 2;
+    LwEffect p;
+    lw_effect_init(&p);
+    p.id = LW_EFFECT_POISON; p.value = 100; p.turns = 3;
+    lw_effect_add(&s->entities[0], &p);
+
+    int dmg = lw_entity_start_turn(s, 0);
+    int ok = (dmg == 100 &&
+              s->entities[0].hp == 900 &&
+              s->entities[0].used_tp == 0 &&
+              s->entities[0].used_mp == 0);
+    if (!ok) printf("  ent_start: dmg=%d -> FAIL\n", dmg);
+    lw_state_free(s);
+    return ok;
+}
+
+
 int main(void) {
     printf("test_turn:\n");
     int n = 0, ok = 0;
@@ -182,6 +291,10 @@ int main(void) {
     n++; if (test_end_turn_decrements_and_unwinds()){ printf("   5  end_turn_unwinds OK\n"); ok++; }
     n++; if (test_end_turn_keeps_active())          { printf("   6  end_turn_keeps_active OK\n"); ok++; }
     n++; if (test_end_turn_all_skips_dead())        { printf("   7  end_turn_all_skips_dead OK\n"); ok++; }
+    n++; if (test_round_rotation())                 { printf("   8  round_rotation OK\n"); ok++; }
+    n++; if (test_round_skips_dead())               { printf("   9  round_skips_dead OK\n"); ok++; }
+    n++; if (test_round_resets_resources())         { printf("  10  round_resets_resources OK\n"); ok++; }
+    n++; if (test_entity_start_turn_resets_and_ticks()) { printf("  11  entity_start_turn OK\n"); ok++; }
     printf("\n%d/%d cases passed\n", ok, n);
     return ok == n ? 0 : 1;
 }
