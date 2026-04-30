@@ -7,6 +7,7 @@ Run from the repo root:
 This compiles ``leekwars_c/_engine.pyx`` against the static library
 in ``../../src/`` and drops the .pyd / .so next to the .pyx file.
 """
+import glob
 import os
 import sys
 
@@ -18,15 +19,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 
 
-# All C sources we want statically linked into the extension.
-C_SOURCES = [
-    os.path.join(ROOT, "src", "lw_state.c"),
-    os.path.join(ROOT, "src", "lw_pathfinding.c"),
-    os.path.join(ROOT, "src", "lw_los.c"),
-    os.path.join(ROOT, "src", "lw_action.c"),
-    os.path.join(ROOT, "src", "lw_legal.c"),
-    os.path.join(ROOT, "src", "lw_features.c"),
-]
+# Glob every src/lw_*.c so newly-added modules get picked up
+# automatically. We deliberately don't list them by hand because the
+# port is moving fast and a missed module would hide as a link error.
+C_SOURCES = sorted(glob.glob(os.path.join(ROOT, "src", "lw_*.c")))
 
 INCLUDE_DIRS = [
     os.path.join(ROOT, "include"),
@@ -42,6 +38,8 @@ extensions = [
         ],
         include_dirs=INCLUDE_DIRS,
         extra_compile_args=["/O2"] if sys.platform == "win32" else ["-O2"],
+        # libm is needed for pow() in lw_order.c on Linux/Mac.
+        libraries=[] if sys.platform == "win32" else ["m"],
         language="c",
     ),
 ]
