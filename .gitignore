@@ -1,0 +1,33 @@
+# Build artefacts
+build/
+*.o
+*.obj
+*.lib
+*.exp
+*.dll
+*.so
+*.dylib
+*.pyd
+*.a
+*.exe
+
+# Cython generated C
+bindings/python/**/*.c
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Logs
+*.log
