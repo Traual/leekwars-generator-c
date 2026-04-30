@@ -196,6 +196,57 @@ cdef extern from "lw_winner.h":
     int lw_compute_winner(const LwState *state, int draw_check_hp)
 
 
+cdef extern from "lw_damage.h":
+    int lw_apply_damage(LwState *state, int caster_idx, int target_idx,
+                        double value1, double value2, double jet,
+                        double aoe, double critical_power, int target_count)
+    int lw_apply_heal(LwState *state, int caster_idx, int target_idx,
+                      double value1, double value2, double jet,
+                      double aoe, double critical_power, int target_count)
+    int lw_apply_absolute_shield(LwState *state, int caster_idx, int target_idx,
+                                 double value1, double value2, double jet,
+                                 double aoe, double critical_power)
+    int lw_apply_relative_shield(LwState *state, int caster_idx, int target_idx,
+                                 double value1, double value2, double jet,
+                                 double aoe, double critical_power)
+    int lw_apply_erosion(LwState *state, int target_idx,
+                         int value, double rate)
+
+
+cdef extern from "lw_effects.h":
+    int lw_apply_buff_stat(LwState *state, int caster_idx, int target_idx,
+                           int stat_index, int scale_stat,
+                           double value1, double value2, double jet,
+                           double aoe, double critical_power)
+    int lw_apply_shackle(LwState *state, int caster_idx, int target_idx,
+                         int stat_index, double value1, double value2,
+                         double jet, double aoe, double critical_power)
+    int lw_apply_aftereffect(LwState *state, int caster_idx, int target_idx,
+                             double value1, double value2, double jet,
+                             double aoe, double critical_power)
+    int lw_compute_poison_damage(const LwState *state, int caster_idx,
+                                  int target_idx, double value1, double value2,
+                                  double jet, double aoe, double critical_power)
+    int lw_apply_vitality(LwState *state, int caster_idx, int target_idx,
+                          double value1, double value2, double jet,
+                          double aoe, double critical_power)
+    int lw_apply_nova_vitality(LwState *state, int caster_idx, int target_idx,
+                               double value1, double value2, double jet,
+                               double aoe, double critical_power)
+    int lw_apply_nova_damage(LwState *state, int caster_idx, int target_idx,
+                             double value1, double value2, double jet,
+                             double aoe, double critical_power)
+    int lw_apply_life_damage(LwState *state, int caster_idx, int target_idx,
+                             double value1, double value2, double jet,
+                             double aoe, double critical_power)
+    int lw_apply_raw_buff_stat(LwState *state, int target_idx, int stat_index,
+                               double value1, double value2, double jet,
+                               double aoe, double critical_power)
+    int lw_apply_vulnerability(LwState *state, int target_idx,
+                               double value1, double value2, double jet,
+                               double aoe, double critical_power)
+
+
 # --- Python-side constants -------------------------------------------
 
 LW_MAX_INVENTORY = 6
@@ -532,6 +583,101 @@ cdef class State:
         return lw_apply_attack_full(self._s, caster_idx, target_cell_id,
                                     &spec._s)
 
+    # -- Direct apply hooks (used by the parity gate) ----------------
+    # These call the byte-for-byte formulas with a caller-supplied jet
+    # and critical_power, without rolling RNG. Useful for asserting
+    # exact equivalence with the Python reference engine on the same
+    # numeric inputs.
+
+    def _apply_damage(self, int caster_idx, int target_idx,
+                      double v1, double v2, double jet,
+                      double aoe, double crit_pwr, int target_count):
+        return lw_apply_damage(self._s, caster_idx, target_idx,
+                               v1, v2, jet, aoe, crit_pwr, target_count)
+
+    def _apply_heal(self, int caster_idx, int target_idx,
+                    double v1, double v2, double jet,
+                    double aoe, double crit_pwr, int target_count):
+        return lw_apply_heal(self._s, caster_idx, target_idx,
+                             v1, v2, jet, aoe, crit_pwr, target_count)
+
+    def _apply_absolute_shield(self, int caster_idx, int target_idx,
+                                double v1, double v2, double jet,
+                                double aoe, double crit_pwr):
+        return lw_apply_absolute_shield(self._s, caster_idx, target_idx,
+                                         v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_relative_shield(self, int caster_idx, int target_idx,
+                                double v1, double v2, double jet,
+                                double aoe, double crit_pwr):
+        return lw_apply_relative_shield(self._s, caster_idx, target_idx,
+                                         v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_buff_stat(self, int caster_idx, int target_idx,
+                          int stat_index, int scale_stat,
+                          double v1, double v2, double jet,
+                          double aoe, double crit_pwr):
+        return lw_apply_buff_stat(self._s, caster_idx, target_idx,
+                                   stat_index, scale_stat,
+                                   v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_shackle(self, int caster_idx, int target_idx, int stat_index,
+                        double v1, double v2, double jet,
+                        double aoe, double crit_pwr):
+        return lw_apply_shackle(self._s, caster_idx, target_idx, stat_index,
+                                 v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_aftereffect(self, int caster_idx, int target_idx,
+                            double v1, double v2, double jet,
+                            double aoe, double crit_pwr):
+        return lw_apply_aftereffect(self._s, caster_idx, target_idx,
+                                     v1, v2, jet, aoe, crit_pwr)
+
+    def _compute_poison_damage(self, int caster_idx, int target_idx,
+                                double v1, double v2, double jet,
+                                double aoe, double crit_pwr):
+        return lw_compute_poison_damage(self._s, caster_idx, target_idx,
+                                         v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_vitality(self, int caster_idx, int target_idx,
+                         double v1, double v2, double jet,
+                         double aoe, double crit_pwr):
+        return lw_apply_vitality(self._s, caster_idx, target_idx,
+                                  v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_nova_vitality(self, int caster_idx, int target_idx,
+                              double v1, double v2, double jet,
+                              double aoe, double crit_pwr):
+        return lw_apply_nova_vitality(self._s, caster_idx, target_idx,
+                                       v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_nova_damage(self, int caster_idx, int target_idx,
+                            double v1, double v2, double jet,
+                            double aoe, double crit_pwr):
+        return lw_apply_nova_damage(self._s, caster_idx, target_idx,
+                                     v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_life_damage(self, int caster_idx, int target_idx,
+                            double v1, double v2, double jet,
+                            double aoe, double crit_pwr):
+        return lw_apply_life_damage(self._s, caster_idx, target_idx,
+                                     v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_raw_buff_stat(self, int target_idx, int stat_index,
+                              double v1, double v2, double jet,
+                              double aoe, double crit_pwr):
+        return lw_apply_raw_buff_stat(self._s, target_idx, stat_index,
+                                       v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_vulnerability(self, int target_idx,
+                              double v1, double v2, double jet,
+                              double aoe, double crit_pwr):
+        return lw_apply_vulnerability(self._s, target_idx,
+                                       v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_erosion(self, int target_idx, int value, double rate):
+        return lw_apply_erosion(self._s, target_idx, value, rate)
+
     def extract_mlp_features(self, int my_team, out):
         """Fill ``out`` (a 256-element float32 buffer, typically a numpy
         view) with the MLP feature vector. ``out`` must implement the
@@ -570,6 +716,30 @@ cdef class State:
 
     def entity_n_effects(self, int idx):
         return self._s.entities[idx].n_effects
+
+    def entity_base_stat(self, int idx, int stat_index):
+        return self._s.entities[idx].base_stats[stat_index]
+
+    def entity_buff_stat(self, int idx, int stat_index):
+        return self._s.entities[idx].buff_stats[stat_index]
+
+    # -- Direct setters (for tests / parity gate) --------------------
+
+    def _set_entity_hp(self, int idx, int hp, int total_hp):
+        self._s.entities[idx].hp = hp
+        self._s.entities[idx].total_hp = total_hp
+
+    def _set_entity_alive(self, int idx, bint alive):
+        self._s.entities[idx].alive = 1 if alive else 0
+
+    def _set_entity_state_flag(self, int idx, unsigned int flag):
+        self._s.entities[idx].state_flags = flag
+
+    def _set_base_stat(self, int idx, int stat_index, int value):
+        self._s.entities[idx].base_stats[stat_index] = value
+
+    def _set_buff_stat(self, int idx, int stat_index, int value):
+        self._s.entities[idx].buff_stats[stat_index] = value
 
     # -- RNG management ----------------------------------------------
 

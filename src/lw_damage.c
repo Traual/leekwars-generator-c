@@ -68,7 +68,14 @@ int lw_apply_damage(LwState *state,
              * (double)target_count
              * (1.0 + (double)power / 100.0);
 
-    /* Step 2: shields. Python applies BOTH relative pct AND absolute
+    /* Step 2 (Python order: BEFORE shields): compute return_damage. */
+    int return_damage = 0;
+    if (target_idx != caster_idx) {
+        int dr = stat(target, LW_STAT_DAMAGE_RETURN);
+        return_damage = java_round(d * (double)dr / 100.0);
+    }
+
+    /* Step 3: shields. Python applies BOTH relative pct AND absolute
      * subtraction in a single expression -- so the order matches:
      *   d -= d * relshield/100 + abs_shield
      */
@@ -76,20 +83,28 @@ int lw_apply_damage(LwState *state,
     int abs_sh = stat(target, LW_STAT_ABSOLUTE_SHIELD);
     d -= d * ((double)rel / 100.0) + (double)abs_sh;
 
-    /* Step 3: floor at 0. */
+    /* Step 4: floor at 0. */
     if (d < 0.0) d = 0.0;
 
-    /* Step 4: INVINCIBLE shortcut. */
+    /* Step 5: INVINCIBLE shortcut. */
     if (target->state_flags & LW_STATE_INVINCIBLE) {
         d = 0.0;
     }
 
-    /* Step 5: round + cap to remaining HP. */
+    /* Step 6: round + cap to remaining HP. */
     int dealt = java_round(d);
     if (dealt < 0) dealt = 0;
     if (dealt > target->hp) dealt = target->hp;
 
-    /* Step 6: subtract HP, mark dead if needed. */
+    /* Step 7 (Python order): compute life steal from rounded ``value``
+     * AFTER shields, BEFORE removing HP. */
+    int life_steal = 0;
+    if (target_idx != caster_idx) {
+        int wisdom = stat(caster, LW_STAT_WISDOM);
+        life_steal = java_round((double)dealt * (double)wisdom / 1000.0);
+    }
+
+    /* Step 8: subtract target HP, mark dead if needed. */
     target->hp -= dealt;
     if (target->hp <= 0) {
         target->hp = 0;
@@ -99,6 +114,38 @@ int lw_apply_damage(LwState *state,
             target->cell_id = -1;
         }
     }
+
+    /* Step 9: life steal — heals caster up to missing HP, blocked by
+     * UNHEALABLE on caster, no-op if caster died (e.g. self-target with
+     * crazy modifiers). */
+    if (life_steal > 0 &&
+        caster->alive &&
+        !(caster->state_flags & LW_STATE_UNHEALABLE) &&
+        caster->hp < caster->total_hp) {
+        int missing = caster->total_hp - caster->hp;
+        if (life_steal > missing) life_steal = missing;
+        if (life_steal > 0) {
+            caster->hp += life_steal;
+        }
+    }
+
+    /* Step 10: return damage to caster from target's DAMAGE_RETURN
+     * buff. Blocked by INVINCIBLE on caster, capped at caster HP. */
+    if (return_damage > 0 && !(caster->state_flags & LW_STATE_INVINCIBLE)) {
+        if (return_damage > caster->hp) return_damage = caster->hp;
+        if (return_damage > 0) {
+            caster->hp -= return_damage;
+            if (caster->hp <= 0) {
+                caster->hp = 0;
+                caster->alive = 0;
+                if (caster->cell_id >= 0) {
+                    state->map.entity_at_cell[caster->cell_id] = -1;
+                    caster->cell_id = -1;
+                }
+            }
+        }
+    }
+
     return dealt;
 }
 
