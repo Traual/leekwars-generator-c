@@ -19,6 +19,11 @@ file(GLOB LW_SRC CONFIGURE_DEPENDS "src/*.c")
 add_library(lwengine STATIC ${LW_SRC})
 target_include_directories(lwengine PUBLIC include)
 
+# math (libm) needed for pow / floor on Linux+gcc.
+if(NOT MSVC)
+  target_link_libraries(lwengine PUBLIC m)
+endif()
+
 # Tests ----------------------------------------------------------------
 
 enable_testing()
