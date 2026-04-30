@@ -338,4 +338,25 @@ int lw_apply_steal_absolute_shield(LwState *state,
  * count removed. */
 int lw_apply_remove_shackles(LwState *state, int target_idx);
 
+/* ---------------- multiply stats (Colossus mode) -------------- */
+
+/*
+ * EffectMultiplyStats: multiplies (factor-1) is added to buff_stats[]
+ * for every base stat slot in {STRENGTH, AGILITY, RESISTANCE, WISDOM,
+ * SCIENCE, MAGIC, FREQUENCY, TP, MP}. Then total_hp grows by
+ * base_life * (factor - 1) (if no previous boost) or base_life if
+ * a previous multiply is already in effect.
+ *
+ * The current_hp is healed proportionally so the (hp / total_hp)
+ * ratio is preserved.
+ *
+ * factor must be int(value1) >= 2 -- factor <= 1 is a no-op.
+ *
+ * Returns the factor used (>= 2) or 0 on no-op.
+ */
+int lw_apply_multiply_stats(LwState *state,
+                            int caster_idx,
+                            int target_idx,
+                            double value1);
+
 #endif /* LW_EFFECTS_H */

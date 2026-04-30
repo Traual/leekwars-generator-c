@@ -641,3 +641,62 @@ int lw_apply_remove_shackles(LwState *state, int target_idx) {
     }
     return removed;
 }
+
+
+int lw_apply_multiply_stats(LwState *state,
+                            int caster_idx,
+                            int target_idx,
+                            double value1) {
+    /* EffectMultiplyStats.apply: multiplies all base stats by factor.
+     * Factor stored as int(value1). factor <= 1 -> no-op. */
+    (void)caster_idx;
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+
+    int factor = (int)value1;
+    if (factor <= 1) return 0;
+
+    LwEntity *target = &state->entities[target_idx];
+
+    /* Multiply non-life stats. */
+    int slots[] = {
+        LW_STAT_STRENGTH, LW_STAT_AGILITY, LW_STAT_RESISTANCE,
+        LW_STAT_WISDOM,   LW_STAT_SCIENCE, LW_STAT_MAGIC,
+        LW_STAT_FREQUENCY, LW_STAT_TP,     LW_STAT_MP
+    };
+    int n_slots = (int)(sizeof(slots) / sizeof(slots[0]));
+    for (int i = 0; i < n_slots; i++) {
+        int s = slots[i];
+        int base = target->base_stats[s];
+        int buff = base * (factor - 1);
+        if (buff > 0) {
+            target->buff_stats[s] += buff;
+        }
+    }
+
+    /* Life: if no previous boost, full multiply; if there is one, just
+     * add 1x base. We approximate "previous boost" check by comparing
+     * total_hp against base_life (matches Python). */
+    int base_life = target->base_stats[LW_STAT_LIFE];
+    int life_delta;
+    if (target->total_hp <= base_life) {
+        life_delta = base_life * (factor - 1);
+    } else {
+        life_delta = base_life;
+    }
+
+    /* Preserve hp/total_hp ratio. */
+    double ratio = (target->total_hp > 0)
+                 ? ((double)target->hp / (double)target->total_hp)
+                 : 1.0;
+    target->total_hp += life_delta;
+
+    int new_hp = (int)floor((double)target->total_hp * ratio + 0.5);  /* java_round */
+    int heal = new_hp - target->hp;
+    if (heal > 0) {
+        target->hp += heal;
+        if (target->hp > target->total_hp) target->hp = target->total_hp;
+    }
+
+    return factor;
+}

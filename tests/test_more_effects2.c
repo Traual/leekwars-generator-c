@@ -149,6 +149,45 @@ static int test_steal_absolute_shield_zero(void) {
 }
 
 
+static int test_multiply_stats(void) {
+    /* base str=50, ag=30; total_hp=1000; factor=3 -> str+=100, ag+=60,
+     * total_hp += 1000*2 = 3000. hp scales to keep ratio. */
+    LwState *s = fresh_state();
+    LwEntity *t = &s->entities[1];
+    t->base_stats[LW_STAT_STRENGTH] = 50;
+    t->base_stats[LW_STAT_AGILITY]  = 30;
+    t->base_stats[LW_STAT_LIFE]     = 1000;
+    t->total_hp = 1000;
+    t->hp       = 1000;
+
+    int factor = lw_apply_multiply_stats(s, 0, 1, 3.0);
+    int ok = (factor == 3 &&
+              t->buff_stats[LW_STAT_STRENGTH] == 100 &&
+              t->buff_stats[LW_STAT_AGILITY] == 60 &&
+              t->total_hp == 3000 &&
+              t->hp == 3000);
+    if (!ok) printf("  multiply: f=%d str=%d ag=%d total=%d hp=%d -> FAIL\n",
+                    factor, t->buff_stats[LW_STAT_STRENGTH],
+                    t->buff_stats[LW_STAT_AGILITY],
+                    t->total_hp, t->hp);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_multiply_stats_noop(void) {
+    /* factor=1 -> no-op. */
+    LwState *s = fresh_state();
+    s->entities[1].base_stats[LW_STAT_STRENGTH] = 50;
+    int factor = lw_apply_multiply_stats(s, 0, 1, 1.0);
+    int ok = (factor == 0 &&
+              s->entities[1].buff_stats[LW_STAT_STRENGTH] == 0);
+    if (!ok) printf("  multiply_noop: f=%d -> FAIL\n", factor);
+    lw_state_free(s);
+    return ok;
+}
+
+
 static int test_remove_shackles(void) {
     LwState *s = fresh_state();
     LwEntity *t = &s->entities[1];
@@ -204,6 +243,8 @@ int main(void) {
     n++; if (test_steal_absolute_shield())          { printf("   9  steal_abs_shield OK\n"); ok++; }
     n++; if (test_steal_absolute_shield_zero())     { printf("  10  steal_abs_shield_zero OK\n"); ok++; }
     n++; if (test_remove_shackles())                { printf("  11  remove_shackles OK\n"); ok++; }
+    n++; if (test_multiply_stats())                 { printf("  12  multiply_stats OK\n"); ok++; }
+    n++; if (test_multiply_stats_noop())            { printf("  13  multiply_stats_noop OK\n"); ok++; }
     printf("\n%d/%d cases passed\n", ok, n);
     return ok == n ? 0 : 1;
 }
