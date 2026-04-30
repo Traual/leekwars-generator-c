@@ -54,4 +54,46 @@ int lw_apply_damage(LwState *state,
                     double critical_power,
                     int    target_count);
 
+/*
+ * Apply an immediate (turns=0) heal. Mirrors Python's
+ * EffectHeal.apply when ``turns == 0``. Returns the actual amount
+ * healed (capped to remaining missing HP). UNHEALABLE state -> 0.
+ */
+int lw_apply_heal(LwState *state,
+                  int caster_idx,
+                  int target_idx,
+                  double value1,
+                  double value2,
+                  double jet,
+                  double aoe,
+                  double critical_power,
+                  int    target_count);
+
+/*
+ * Apply an absolute shield buff. Mirrors EffectAbsoluteShield.apply.
+ * Adds to target.buff_stats[ABSOLUTE_SHIELD]. Returns the shield
+ * amount granted.
+ */
+int lw_apply_absolute_shield(LwState *state,
+                             int caster_idx,
+                             int target_idx,
+                             double value1,
+                             double value2,
+                             double jet,
+                             double aoe,
+                             double critical_power);
+
+/*
+ * Apply a relative (percentage) shield buff. Mirrors
+ * EffectRelativeShield.apply.
+ */
+int lw_apply_relative_shield(LwState *state,
+                             int caster_idx,
+                             int target_idx,
+                             double value1,
+                             double value2,
+                             double jet,
+                             double aoe,
+                             double critical_power);
+
 #endif /* LW_DAMAGE_H */

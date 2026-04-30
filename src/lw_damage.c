@@ -101,3 +101,87 @@ int lw_apply_damage(LwState *state,
     }
     return dealt;
 }
+
+
+int lw_apply_heal(LwState *state,
+                  int caster_idx,
+                  int target_idx,
+                  double value1,
+                  double value2,
+                  double jet,
+                  double aoe,
+                  double critical_power,
+                  int    target_count) {
+    if (state == NULL) return 0;
+    if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *caster = &state->entities[caster_idx];
+    LwEntity *target = &state->entities[target_idx];
+    if (!target->alive) return 0;
+    if (target->state_flags & LW_STATE_UNHEALABLE) return 0;
+
+    int wisdom = stat(caster, LW_STAT_WISDOM);
+    double v = (value1 + jet * value2)
+             * (1.0 + (double)wisdom / 100.0)
+             * aoe * critical_power * (double)target_count;
+    int amount = java_round(v);
+    if (amount < 0) amount = 0;
+
+    int missing = target->total_hp - target->hp;
+    if (amount > missing) amount = missing;
+
+    target->hp += amount;
+    return amount;
+}
+
+
+int lw_apply_absolute_shield(LwState *state,
+                             int caster_idx,
+                             int target_idx,
+                             double value1,
+                             double value2,
+                             double jet,
+                             double aoe,
+                             double critical_power) {
+    if (state == NULL) return 0;
+    if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *caster = &state->entities[caster_idx];
+    LwEntity *target = &state->entities[target_idx];
+
+    int resistance = stat(caster, LW_STAT_RESISTANCE);
+    double v = (value1 + jet * value2)
+             * (1.0 + (double)resistance / 100.0)
+             * aoe * critical_power;
+    int amount = java_round(v);
+    if (amount > 0) {
+        target->buff_stats[LW_STAT_ABSOLUTE_SHIELD] += amount;
+    }
+    return amount > 0 ? amount : 0;
+}
+
+
+int lw_apply_relative_shield(LwState *state,
+                             int caster_idx,
+                             int target_idx,
+                             double value1,
+                             double value2,
+                             double jet,
+                             double aoe,
+                             double critical_power) {
+    if (state == NULL) return 0;
+    if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    LwEntity *caster = &state->entities[caster_idx];
+    LwEntity *target = &state->entities[target_idx];
+
+    int resistance = stat(caster, LW_STAT_RESISTANCE);
+    double v = (value1 + jet * value2)
+             * (1.0 + (double)resistance / 100.0)
+             * aoe * critical_power;
+    int amount = java_round(v);
+    if (amount > 0) {
+        target->buff_stats[LW_STAT_RELATIVE_SHIELD] += amount;
+    }
+    return amount > 0 ? amount : 0;
+}
