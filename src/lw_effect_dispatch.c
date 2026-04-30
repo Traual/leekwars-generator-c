@@ -297,6 +297,12 @@ int lw_effect_create(LwState *state, const LwEffectInput *p) {
             return lw_apply_multiply_stats(state, p->caster_idx, p->target_idx,
                                             p->value1);
 
+        case LW_EFFECT_RESURRECT:
+            /* The dispatcher doesn't know the destination cell here;
+             * the attack-application path needs to call lw_apply_resurrect
+             * directly with the chosen cell. Return 0 as a no-op. */
+            return 0;
+
         /* ---------- movement effects ---------- */
         case LW_EFFECT_TELEPORT:
             /* The dispatcher doesn't know the destination cell; the

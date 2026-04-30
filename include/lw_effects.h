@@ -338,6 +338,31 @@ int lw_apply_steal_absolute_shield(LwState *state,
  * count removed. */
 int lw_apply_remove_shackles(LwState *state, int target_idx);
 
+/* ---------------- resurrect ----------------------------------- */
+
+/*
+ * EffectResurrect: bring a dead entity back to life at the chosen
+ * cell. Mirrors Entity.resurrect + State.resurrect (without the
+ * order-management details, which are deferred to the order driver):
+ *
+ *   if fullLife:
+ *     life = total_hp
+ *   else:
+ *     total_hp = max(10, round(total_hp * 0.5 * factor))
+ *     life    = total_hp / 2
+ *
+ * factor is CRITICAL_FACTOR on a crit, 1.0 otherwise. The resurrected
+ * entity also has its `resurrected` counter bumped, state_flags |=
+ * RESURRECTED, alive=1, cell_id=dest_cell.
+ *
+ * Returns 1 on success, 0 if the target wasn't dead, -1 on bad input.
+ */
+int lw_apply_resurrect(LwState *state,
+                       int target_idx,
+                       int dest_cell,
+                       int full_life,
+                       int critical);
+
 /* ---------------- multiply stats (Colossus mode) -------------- */
 
 /*

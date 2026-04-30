@@ -643,6 +643,36 @@ int lw_apply_remove_shackles(LwState *state, int target_idx) {
 }
 
 
+int lw_apply_resurrect(LwState *state,
+                       int target_idx,
+                       int dest_cell,
+                       int full_life,
+                       int critical) {
+    if (state == NULL) return -1;
+    if (target_idx < 0 || target_idx >= state->n_entities) return -1;
+    LwEntity *t = &state->entities[target_idx];
+    if (t->alive) return 0;
+    if (dest_cell < 0 || dest_cell >= LW_MAX_CELLS) return -1;
+    if (state->map.topo != NULL && dest_cell >= state->map.topo->n_cells) return -1;
+    if (state->map.entity_at_cell[dest_cell] >= 0) return -1;
+
+    double factor = critical ? 1.3 : 1.0;
+    if (full_life) {
+        t->hp = t->total_hp;
+    } else {
+        int new_total = java_round((double)t->total_hp * 0.5 * factor);
+        if (new_total < 10) new_total = 10;
+        t->total_hp = new_total;
+        t->hp = new_total / 2;
+    }
+    t->alive = 1;
+    t->state_flags |= LW_STATE_RESURRECTED;
+    t->cell_id = dest_cell;
+    state->map.entity_at_cell[dest_cell] = target_idx;
+    return 1;
+}
+
+
 int lw_apply_multiply_stats(LwState *state,
                             int caster_idx,
                             int target_idx,

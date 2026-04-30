@@ -229,6 +229,58 @@ static int test_remove_shackles(void) {
 }
 
 
+static int test_resurrect_full_life(void) {
+    LwState *s = fresh_state();
+    LwEntity *t = &s->entities[1];
+    t->alive = 0;
+    t->hp = 0;
+    t->total_hp = 800;
+    t->cell_id = -1;
+
+    /* Pick a free cell. */
+    int dest = 5;
+    int rc = lw_apply_resurrect(s, 1, dest, /*full_life*/1, /*crit*/0);
+    int ok = (rc == 1 && t->alive &&
+              t->hp == 800 && t->total_hp == 800 &&
+              t->cell_id == dest &&
+              (t->state_flags & LW_STATE_RESURRECTED) != 0 &&
+              s->map.entity_at_cell[dest] == 1);
+    if (!ok) printf("  resurrect_full: rc=%d hp=%d alive=%d -> FAIL\n",
+                    rc, t->hp, t->alive);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_resurrect_partial(void) {
+    LwState *s = fresh_state();
+    LwEntity *t = &s->entities[1];
+    t->alive = 0;
+    t->hp = 0;
+    t->total_hp = 800;
+    t->cell_id = -1;
+
+    /* fullLife=0, no crit -> total = round(800 * 0.5 * 1.0) = 400, hp = 200. */
+    int rc = lw_apply_resurrect(s, 1, 5, 0, 0);
+    int ok = (rc == 1 && t->alive &&
+              t->total_hp == 400 && t->hp == 200);
+    if (!ok) printf("  resurrect_partial: total=%d hp=%d -> FAIL\n",
+                    t->total_hp, t->hp);
+    lw_state_free(s);
+    return ok;
+}
+
+
+static int test_resurrect_already_alive(void) {
+    LwState *s = fresh_state();
+    int rc = lw_apply_resurrect(s, 1, 5, 1, 0);
+    int ok = (rc == 0 && s->entities[1].alive);
+    if (!ok) printf("  resurrect_alive: rc=%d -> FAIL\n", rc);
+    lw_state_free(s);
+    return ok;
+}
+
+
 int main(void) {
     printf("test_more_effects2:\n");
     int n = 0, ok = 0;
@@ -245,6 +297,9 @@ int main(void) {
     n++; if (test_remove_shackles())                { printf("  11  remove_shackles OK\n"); ok++; }
     n++; if (test_multiply_stats())                 { printf("  12  multiply_stats OK\n"); ok++; }
     n++; if (test_multiply_stats_noop())            { printf("  13  multiply_stats_noop OK\n"); ok++; }
+    n++; if (test_resurrect_full_life())            { printf("  14  resurrect_full_life OK\n"); ok++; }
+    n++; if (test_resurrect_partial())              { printf("  15  resurrect_partial OK\n"); ok++; }
+    n++; if (test_resurrect_already_alive())        { printf("  16  resurrect_already_alive OK\n"); ok++; }
     printf("\n%d/%d cases passed\n", ok, n);
     return ok == n ? 0 : 1;
 }
