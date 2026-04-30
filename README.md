@@ -20,21 +20,34 @@ unlock new training regimes.
 Active development. The Python and Java engines are the references;
 this C port is being built bottom-up alongside parity tests.
 
-| Component                            | Status |
-|--------------------------------------|--------|
-| State / Map / Entity structs         | ✅ done |
-| State alloc + memcpy clone + pool    | ✅ done |
-| RNG (LCG matching Java/Python)       | ✅ 6/6 byte-for-byte parity |
-| A* pathfinding (LIFO tie-break)      | ✅ done |
-| BFS-bounded reachability             | ✅ done |
-| Line-of-sight + canUseAttack         | ✅ done |
-| `legal_actions` enumeration          | ✅ done |
-| `apply_action`: END / SET_WEAPON / MOVE | ✅ done |
-| `apply_action`: USE_WEAPON / USE_CHIP | ⚠️ approximate (NOT Java-parity) |
-| Effects (poison / shield / buff)     | ⚠️ partial (in chip apply only) |
-| `extract_mlp_features` (zero-copy)   | ✅ done |
-| Java parity gate on full fights      | ❌ TODO |
-| Python (Cython) bindings             | ✅ done |
+| Component                                 | Status |
+|-------------------------------------------|--------|
+| State / Map / Entity structs              | ✅ done |
+| State alloc + memcpy clone + pool         | ✅ done |
+| RNG (LCG matching Java/Python)            | ✅ 6/6 byte-for-byte parity |
+| A* pathfinding (LIFO tie-break)           | ✅ done |
+| BFS-bounded reachability                  | ✅ done |
+| Line-of-sight + canUseAttack              | ✅ done |
+| `legal_actions` enumeration               | ✅ done |
+| `apply_action`: END / SET_WEAPON / MOVE   | ✅ done |
+| `apply_action`: USE_WEAPON / USE_CHIP     | ✅ done (catalog-routed → byte-for-byte pipeline; falls back to deterministic stub if catalog empty) |
+| Damage / Heal / Shield formulas           | ✅ 16+4 byte-for-byte cases |
+| Critical-hit roll (agility/1000)          | ✅ 6/6 byte-for-byte cases |
+| Erosion (max-HP reduction)                | ✅ 6/6 cases |
+| AoE shapes (11 mask + 4 dynamic)          | ✅ 18/18 cases |
+| Effect-storage framework                  | ✅ 9/9 cases |
+| Effect dispatcher (`Effect.createEffect`) | ✅ 9/9 cases — ~35 effect types routed |
+| Attack pipeline (`Attack.applyOnCell`)    | ✅ 6/6 cases |
+| Movement (Push/Attract/Slide/TP/Permute)  | ✅ 9/9 cases |
+| Turn driver + Round driver                | ✅ 11/11 cases |
+| Start order (StartOrder.compute)          | ✅ 4/4 byte-for-byte cases |
+| Winner detection (alive teams + HP)       | ✅ 9/9 cases |
+| `extract_mlp_features` (zero-copy)        | ✅ done |
+| Python (Cython) bindings                  | ✅ done (legacy primitives; new ones unwired) |
+| Java parity gate on full fights           | ❌ TODO |
+| Action-stream JSON output                 | ❌ TODO |
+| Resurrect / Summon (entity allocation)    | ❌ TODO |
+| Passive event hooks (POISON_TO_*, etc.)   | ❌ TODO |
 
 ## Microbench (Python -> C, 5x5 toy state)
 
@@ -106,12 +119,26 @@ bindings/
 
 ## Important caveat
 
-The C engine is **not** a drop-in replacement for the Python /
-Java engine. USE_WEAPON / USE_CHIP / effects use a deterministic
-approximation good enough for AI scoring but not for byte-for-byte
-fight reproduction. For training data generation you should still
-run fights through the Python engine; the C engine is the AI's
-fast search backend.
+The C engine has now reached byte-for-byte parity with the Python
+reference for the **combat core** (damage, heal, shields, buffs,
+debuffs, shackles, vulnerabilities, poison, aftereffect, life
+damage, nova damage, vitality, kill, multiply stats, antidote,
+remove shackles, vulnerability, ~35 effect types in total) plus the
+core drivers (start order, turn rotation, winner detection, attack
+pipeline, AoE shapes, critical roll, erosion).
+
+What's still missing for full Java-parity self-play:
+
+  - **Action-stream JSON output** so the Python parity gate can
+    diff C vs. Python event-by-event
+  - **Resurrect / Summon** (need an entity-allocation path)
+  - **Passive event hooks** for POISON_TO_*, DAMAGE_TO_*,
+    KILL_TO_TP, ALLY_KILLED_TO_AGILITY, etc.
+
+The end-to-end self-play loop (`tests/test_full_fight.c`) already
+runs a 1v1 to a clean winner using only C primitives, including
+the byte-for-byte attack pipeline. The remaining items are about
+verification and edge-case coverage, not core combat correctness.
 
 ## License
 
