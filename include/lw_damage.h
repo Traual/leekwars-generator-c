@@ -96,4 +96,19 @@ int lw_apply_relative_shield(LwState *state,
                              double aoe,
                              double critical_power);
 
+/*
+ * Apply max-HP erosion. Mirrors the second arg of Python's
+ * Entity.removeLife(pv, erosion, ...): subtracts round(value * rate)
+ * from target.total_hp, with a floor of 1. Returns the erosion amount
+ * actually applied.
+ *
+ * ``rate`` comes from Effect.EROSION_DAMAGE (0.05), Effect.EROSION_POISON
+ * (0.10), with +Effect.EROSION_CRITICAL_BONUS (0.10) on a crit. Helper
+ * lw_erosion_rate computes that combination.
+ */
+int    lw_apply_erosion(LwState *state, int target_idx,
+                        int value, double rate);
+
+double lw_erosion_rate(int effect_type, int is_critical);
+
 #endif /* LW_DAMAGE_H */

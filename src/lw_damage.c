@@ -185,3 +185,32 @@ int lw_apply_relative_shield(LwState *state,
     }
     return amount > 0 ? amount : 0;
 }
+
+
+int lw_apply_erosion(LwState *state, int target_idx,
+                     int value, double rate) {
+    /* Python: erosion = round(value * rate); total_hp -= erosion;
+     * floor total_hp at 1. */
+    if (state == NULL) return 0;
+    if (target_idx < 0 || target_idx >= state->n_entities) return 0;
+    if (value <= 0 || rate <= 0.0) return 0;
+
+    LwEntity *target = &state->entities[target_idx];
+    int erosion = java_round((double)value * rate);
+    if (erosion <= 0) return 0;
+
+    target->total_hp -= erosion;
+    if (target->total_hp < 1) target->total_hp = 1;
+    return erosion;
+}
+
+
+double lw_erosion_rate(int effect_type, int is_critical) {
+    /* Effect.EROSION_DAMAGE (0.05) for direct/aftereffect damage,
+     * EROSION_POISON (0.10) for poison. Crit adds EROSION_CRITICAL_BONUS
+     * (0.10) on top. */
+    double base = 0.05;
+    if (effect_type == 13 /* LW_EFFECT_POISON */) base = 0.10;
+    if (is_critical) base += 0.10;
+    return base;
+}
