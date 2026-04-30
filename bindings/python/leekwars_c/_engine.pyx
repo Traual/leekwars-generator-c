@@ -319,7 +319,17 @@ cdef class State:
     def add_entity(self, int fid, int team_id, int cell_id,
                    int total_tp, int total_mp,
                    int hp, int total_hp,
-                   list weapons, list chips):
+                   list weapons, list chips,
+                   int level=1,
+                   int strength=0, int agility=0,
+                   int wisdom=0, int resistance=0,
+                   int science=0, int magic=0,
+                   int frequency=100, int power=0,
+                   int absolute_shield=0, int relative_shield=0,
+                   int damage_return=0):
+        """Add an entity to the state. All stats are set into base_stats;
+        buff_stats start at 0 and accumulate buffs/debuffs as effects
+        are applied during the fight."""
         cdef int idx = self._s.n_entities
         if idx >= 90:
             raise OverflowError("entity slots full")
@@ -329,10 +339,28 @@ cdef class State:
         e.fid = fid
         e.team_id = team_id
         e.cell_id = cell_id
+        e.level = level
         e.hp = hp
         e.total_hp = total_hp
-        e.base_stats[C_STAT_TP] = total_tp
-        e.base_stats[C_STAT_MP] = total_mp
+
+        # Base stats — indices must match include/lw_types.h
+        # (Mismatch was the silent bug behind the C-backed AI's
+        # divergent decisions before this refactor.)
+        e.base_stats[0]  = total_hp        # LIFE
+        e.base_stats[1]  = total_tp        # TP
+        e.base_stats[2]  = total_mp        # MP
+        e.base_stats[3]  = strength
+        e.base_stats[4]  = agility
+        e.base_stats[5]  = frequency
+        e.base_stats[6]  = wisdom
+        e.base_stats[9]  = absolute_shield
+        e.base_stats[10] = relative_shield
+        e.base_stats[11] = resistance
+        e.base_stats[12] = science
+        e.base_stats[13] = magic
+        e.base_stats[14] = damage_return
+        e.base_stats[15] = power
+
         e.alive = 1
         e.equipped_weapon = -1
         e.n_weapons = min(len(weapons), 6)

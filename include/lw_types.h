@@ -58,7 +58,11 @@
 #define LW_STATE_PETRIFIED    (1u << 10)
 #define LW_STATE_STATIC       (1u << 11)
 
-/* Stat indices -- must match engine.entity.Entity.STAT_* */
+/* Stat indices -- must match engine.entity.Entity.STAT_* exactly.
+ * Verified against leekwars/state/entity.py:15-34. The previous
+ * version of this header had ABS/REL_SHIELD and RESISTANCE swapped
+ * in numbering, which silently corrupted feature extraction and
+ * damage shield arithmetic. */
 
 #define LW_STAT_LIFE             0
 #define LW_STAT_TP               1
@@ -67,14 +71,14 @@
 #define LW_STAT_AGILITY          4
 #define LW_STAT_FREQUENCY        5
 #define LW_STAT_WISDOM           6
-/* gaps at 7, 8 (formerly stamina/charisma) */
-#define LW_STAT_RESISTANCE       9
-#define LW_STAT_SCIENCE         10
-#define LW_STAT_MAGIC           11
-#define LW_STAT_RELATIVE_SHIELD 12
-#define LW_STAT_ABSOLUTE_SHIELD 13
+/* gaps at 7, 8 (unused by the engine) */
+#define LW_STAT_ABSOLUTE_SHIELD  9
+#define LW_STAT_RELATIVE_SHIELD 10
+#define LW_STAT_RESISTANCE      11
+#define LW_STAT_SCIENCE         12
+#define LW_STAT_MAGIC           13
 #define LW_STAT_DAMAGE_RETURN   14
-#define LW_STAT_RES_LIFE        15
+#define LW_STAT_POWER           15
 #define LW_STAT_CORES           16
 #define LW_STAT_RAM             17
 

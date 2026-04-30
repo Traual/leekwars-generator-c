@@ -58,13 +58,13 @@ static void write_entity_slot32(const LwEntity *e, int my_team, float dist_to_me
     }
     out[7] = 1.0f;  /* alive */
 
-    /* 8..13 : 6 stats */
-    int strength = e->base_stats[3] + e->buff_stats[3];
-    int agility  = e->base_stats[4] + e->buff_stats[4];
-    int wisdom   = e->base_stats[6] + e->buff_stats[6];
-    int resist   = e->base_stats[9] + e->buff_stats[9];
-    int science  = e->base_stats[10] + e->buff_stats[10];
-    int magic    = e->base_stats[11] + e->buff_stats[11];
+    /* 8..13 : 6 stats (indices match engine STAT_*) */
+    int strength = e->base_stats[LW_STAT_STRENGTH]   + e->buff_stats[LW_STAT_STRENGTH];
+    int agility  = e->base_stats[LW_STAT_AGILITY]    + e->buff_stats[LW_STAT_AGILITY];
+    int wisdom   = e->base_stats[LW_STAT_WISDOM]     + e->buff_stats[LW_STAT_WISDOM];
+    int resist   = e->base_stats[LW_STAT_RESISTANCE] + e->buff_stats[LW_STAT_RESISTANCE];
+    int science  = e->base_stats[LW_STAT_SCIENCE]    + e->buff_stats[LW_STAT_SCIENCE];
+    int magic    = e->base_stats[LW_STAT_MAGIC]      + e->buff_stats[LW_STAT_MAGIC];
     out[8]  = safe_div((float)strength, NORM_STR);
     out[9]  = safe_div((float)agility,  NORM_AGI);
     out[10] = safe_div((float)wisdom,   NORM_WIS);
@@ -82,8 +82,10 @@ static void write_entity_slot32(const LwEntity *e, int my_team, float dist_to_me
     /* out[20] = 0 (max range proxy) */
 
     /* 21..23 : shields + poison total */
-    int abs_shield = e->base_stats[13] + e->buff_stats[13];
-    int rel_shield = e->base_stats[12] + e->buff_stats[12];
+    int abs_shield = e->base_stats[LW_STAT_ABSOLUTE_SHIELD]
+                   + e->buff_stats[LW_STAT_ABSOLUTE_SHIELD];
+    int rel_shield = e->base_stats[LW_STAT_RELATIVE_SHIELD]
+                   + e->buff_stats[LW_STAT_RELATIVE_SHIELD];
     out[21] = safe_div((float)abs_shield, NORM_SHIELD_ABS);
     out[22] = safe_div((float)rel_shield, NORM_SHIELD_REL);
 
