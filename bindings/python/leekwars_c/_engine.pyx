@@ -200,6 +200,10 @@ cdef extern from "lw_damage.h":
     int lw_apply_damage(LwState *state, int caster_idx, int target_idx,
                         double value1, double value2, double jet,
                         double aoe, double critical_power, int target_count)
+    int lw_apply_damage_v2(LwState *state, int caster_idx, int target_idx,
+                           double value1, double value2, double jet,
+                           double aoe, double critical_power, int target_count,
+                           double erosion_rate)
     int lw_apply_heal(LwState *state, int caster_idx, int target_idx,
                       double value1, double value2, double jet,
                       double aoe, double critical_power, int target_count)
@@ -594,6 +598,17 @@ cdef class State:
                       double aoe, double crit_pwr, int target_count):
         return lw_apply_damage(self._s, caster_idx, target_idx,
                                v1, v2, jet, aoe, crit_pwr, target_count)
+
+    def _apply_damage_v2(self, int caster_idx, int target_idx,
+                          double v1, double v2, double jet,
+                          double aoe, double crit_pwr, int target_count,
+                          double erosion_rate):
+        """Full Python-parity damage path: applies erosion to target's
+        total_hp via removeLife AND to caster's total_hp on the
+        returnDamage branch."""
+        return lw_apply_damage_v2(self._s, caster_idx, target_idx,
+                                   v1, v2, jet, aoe, crit_pwr, target_count,
+                                   erosion_rate)
 
     def _apply_heal(self, int caster_idx, int target_idx,
                     double v1, double v2, double jet,

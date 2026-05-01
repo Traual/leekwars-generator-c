@@ -654,9 +654,11 @@ def _call_python_damage(v1, v2, jet, strength, power, aoe, crit_pwr, target_coun
                          rel_shield, abs_shield, target_hp, target_total_hp,
                          target_invincible, target_damage_return,
                          caster_wisdom, caster_hp, caster_total_hp,
-                         caster_invincible, caster_unhealable):
-    """Invoke the actual upstream EffectDamage.apply, return
-    (dealt, target_hp_after, caster_hp_after)."""
+                         caster_invincible, caster_unhealable,
+                         erosion_rate):
+    """Invoke the actual upstream EffectDamage.apply with the given
+    erosion_rate. Returns (dealt, target_hp_after, target_total_hp_after,
+    caster_hp_after, caster_total_hp_after)."""
     from leekwars.effect.effect_damage import EffectDamage
 
     caster = _MockEntity(caster_hp, caster_total_hp,
@@ -669,12 +671,12 @@ def _call_python_damage(v1, v2, jet, strength, power, aoe, crit_pwr, target_coun
     e = EffectDamage()
     e.value1 = v1; e.value2 = v2; e.jet = jet
     e.aoe = aoe; e.criticalPower = crit_pwr; e.targetCount = target_count
-    e.erosionRate = 0.0   # disable erosion (we test it separately)
+    e.erosionRate = erosion_rate
     e.caster = caster; e.target = target
     e.attack = None
     state = _MockState()
     e.apply(state)
-    return e.value, target._hp, caster._hp
+    return e.value, target._hp, target._total, caster._hp, caster._total
 
 
 def fuzz_damage_against_real_python(n_cases: int, rng: random.Random) -> int:

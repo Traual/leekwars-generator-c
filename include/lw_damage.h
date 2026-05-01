@@ -55,6 +55,28 @@ int lw_apply_damage(LwState *state,
                     int    target_count);
 
 /*
+ * lw_apply_damage_v2: same formula as lw_apply_damage but also
+ * applies erosion (to target.total_hp via removeLife, and to
+ * caster.total_hp via the returnDamage's removeLife). This matches
+ * Python's EffectDamage.apply byte-for-byte.
+ *
+ * erosion_rate is typically EROSION_DAMAGE (0.05) plus
+ * EROSION_CRITICAL_BONUS (0.10) on a crit. Pass 0.0 to skip erosion.
+ *
+ * Returns dealt damage (same as lw_apply_damage).
+ */
+int lw_apply_damage_v2(LwState *state,
+                       int caster_idx,
+                       int target_idx,
+                       double value1,
+                       double value2,
+                       double jet,
+                       double aoe,
+                       double critical_power,
+                       int    target_count,
+                       double erosion_rate);
+
+/*
  * Apply an immediate (turns=0) heal. Mirrors Python's
  * EffectHeal.apply when ``turns == 0``. Returns the actual amount
  * healed (capped to remaining missing HP). UNHEALABLE state -> 0.

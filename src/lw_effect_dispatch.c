@@ -69,16 +69,15 @@ int lw_effect_create(LwState *state, const LwEffectInput *p) {
     switch (p->type) {
 
         /* ---------- damage ---------- */
-        case LW_EFFECT_DAMAGE:
-            value = lw_apply_damage(state, p->caster_idx, p->target_idx,
-                                    p->value1, p->value2, p->jet,
-                                    p->aoe, crit_power, tc);
-            /* Erosion side-effect (matches Python's removeLife pv+erosion). */
-            if (value > 0) {
-                lw_apply_erosion(state, p->target_idx, value,
-                                 lw_erosion_rate(LW_EFFECT_DAMAGE, p->critical));
-            }
-            return value;
+        case LW_EFFECT_DAMAGE: {
+            /* Erosion is now applied inside lw_apply_damage_v2 to
+             * match Python's EffectDamage.apply byte-for-byte
+             * (target removeLife + caster removeLife on returnDamage). */
+            double rate = lw_erosion_rate(LW_EFFECT_DAMAGE, p->critical);
+            return lw_apply_damage_v2(state, p->caster_idx, p->target_idx,
+                                      p->value1, p->value2, p->jet,
+                                      p->aoe, crit_power, tc, rate);
+        }
 
         case LW_EFFECT_HEAL:
             /* Immediate heal only when turns == 0; for multi-turn we

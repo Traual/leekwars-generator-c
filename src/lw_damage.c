@@ -39,15 +39,39 @@ static int stat(const LwEntity *e, int idx) {
 }
 
 
-int lw_apply_damage(LwState *state,
-                    int caster_idx,
-                    int target_idx,
-                    double value1,
-                    double value2,
-                    double jet,
-                    double aoe,
-                    double critical_power,
-                    int    target_count) {
+/* Internal: Python-equivalent removeLife.
+ * pv reduces hp (capped at remaining); erosion reduces total_hp
+ * (floor 1). Marks dead if hp hits 0. Returns the actual pv applied. */
+static int lw_remove_life(LwState *state, LwEntity *e,
+                          int pv, int erosion) {
+    if (e->hp <= 0) return 0;
+    if (pv > e->hp) pv = e->hp;
+    if (pv < 0) pv = 0;
+    e->hp -= pv;
+    e->total_hp -= erosion;
+    if (e->total_hp < 1) e->total_hp = 1;
+    if (e->hp <= 0) {
+        e->hp = 0;
+        e->alive = 0;
+        if (e->cell_id >= 0) {
+            state->map.entity_at_cell[e->cell_id] = -1;
+            e->cell_id = -1;
+        }
+    }
+    return pv;
+}
+
+
+int lw_apply_damage_v2(LwState *state,
+                       int caster_idx,
+                       int target_idx,
+                       double value1,
+                       double value2,
+                       double jet,
+                       double aoe,
+                       double critical_power,
+                       int    target_count,
+                       double erosion_rate) {
     if (state == NULL) return 0;
     if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
     if (target_idx < 0 || target_idx >= state->n_entities) return 0;
@@ -75,10 +99,7 @@ int lw_apply_damage(LwState *state,
         return_damage = java_round(d * (double)dr / 100.0);
     }
 
-    /* Step 3: shields. Python applies BOTH relative pct AND absolute
-     * subtraction in a single expression -- so the order matches:
-     *   d -= d * relshield/100 + abs_shield
-     */
+    /* Step 3: shields. */
     int rel = stat(target, LW_STAT_RELATIVE_SHIELD);
     int abs_sh = stat(target, LW_STAT_ABSOLUTE_SHIELD);
     d -= d * ((double)rel / 100.0) + (double)abs_sh;
@@ -96,28 +117,20 @@ int lw_apply_damage(LwState *state,
     if (dealt < 0) dealt = 0;
     if (dealt > target->hp) dealt = target->hp;
 
-    /* Step 7 (Python order): compute life steal from rounded ``value``
-     * AFTER shields, BEFORE removing HP. */
+    /* Step 7: life steal from rounded value AFTER shields. */
     int life_steal = 0;
     if (target_idx != caster_idx) {
         int wisdom = stat(caster, LW_STAT_WISDOM);
         life_steal = java_round((double)dealt * (double)wisdom / 1000.0);
     }
 
-    /* Step 8: subtract target HP, mark dead if needed. */
-    target->hp -= dealt;
-    if (target->hp <= 0) {
-        target->hp = 0;
-        target->alive = 0;
-        if (target->cell_id >= 0) {
-            state->map.entity_at_cell[target->cell_id] = -1;
-            target->cell_id = -1;
-        }
-    }
+    /* Step 8: target removeLife with erosion. */
+    int erosion = (erosion_rate > 0.0)
+                ? java_round((double)dealt * erosion_rate) : 0;
+    lw_remove_life(state, target, dealt, erosion);
 
-    /* Step 9: life steal — heals caster up to missing HP, blocked by
-     * UNHEALABLE on caster, no-op if caster died (e.g. self-target with
-     * crazy modifiers). */
+    /* Step 9: life steal -- heals caster up to missing HP, blocked by
+     * UNHEALABLE on caster, no-op if caster died. */
     if (life_steal > 0 &&
         caster->alive &&
         !(caster->state_flags & LW_STATE_UNHEALABLE) &&
@@ -129,24 +142,34 @@ int lw_apply_damage(LwState *state,
         }
     }
 
-    /* Step 10: return damage to caster from target's DAMAGE_RETURN
-     * buff. Blocked by INVINCIBLE on caster, capped at caster HP. */
+    /* Step 10: return damage. Blocked by caster INVINCIBLE. Erosion
+     * derived from the (possibly capped) returnDamage at the same rate. */
     if (return_damage > 0 && !(caster->state_flags & LW_STATE_INVINCIBLE)) {
         if (return_damage > caster->hp) return_damage = caster->hp;
         if (return_damage > 0) {
-            caster->hp -= return_damage;
-            if (caster->hp <= 0) {
-                caster->hp = 0;
-                caster->alive = 0;
-                if (caster->cell_id >= 0) {
-                    state->map.entity_at_cell[caster->cell_id] = -1;
-                    caster->cell_id = -1;
-                }
-            }
+            int return_erosion = (erosion_rate > 0.0)
+                               ? java_round((double)return_damage * erosion_rate) : 0;
+            lw_remove_life(state, caster, return_damage, return_erosion);
         }
     }
 
     return dealt;
+}
+
+
+int lw_apply_damage(LwState *state,
+                    int caster_idx,
+                    int target_idx,
+                    double value1,
+                    double value2,
+                    double jet,
+                    double aoe,
+                    double critical_power,
+                    int    target_count) {
+    /* Backwards-compat wrapper: no erosion. */
+    return lw_apply_damage_v2(state, caster_idx, target_idx,
+                              value1, value2, jet, aoe, critical_power,
+                              target_count, 0.0);
 }
 
 
