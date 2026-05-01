@@ -299,6 +299,11 @@ cdef extern from "lw_effects.h":
     int lw_tick_heal(LwState *state, int target_idx, int per_turn_heal)
 
 
+cdef extern from "lw_critical.h":
+    int    lw_roll_critical(LwState *state, int caster_idx)
+    double lw_roll_critical_power(LwState *state, int caster_idx)
+
+
 # --- Python-side constants -------------------------------------------
 
 LW_MAX_INVENTORY = 6
@@ -800,6 +805,17 @@ cdef class State:
 
     def _tick_heal(self, int target_idx, int per_turn):
         return lw_tick_heal(self._s, target_idx, per_turn)
+
+    def _set_rng(self, long long seed):
+        """Reseed the LCG to match Python's _DefaultRandom.seed(seed).
+        Java parity: signed int64 cast preserves the bit pattern."""
+        self._s.rng_n = <unsigned long long>(<long long>seed)
+
+    def _get_rng(self):
+        return <long long>self._s.rng_n
+
+    def _roll_critical(self, int caster_idx):
+        return lw_roll_critical(self._s, caster_idx)
 
     def extract_mlp_features(self, int my_team, out):
         """Fill ``out`` (a 256-element float32 buffer, typically a numpy

@@ -1454,6 +1454,34 @@ def fuzz_debuff_populated(n_cases, rng):
     return fails
 
 
+def fuzz_critical_roll(n_cases, rng):
+    """Critical roll: agility/1000 vs random draw. Exercises both
+    Python's _DefaultRandom (seeded LCG) and the C engine's lw_rng_double.
+    The roll must produce the same boolean for the same seed."""
+    from leekwars.state.state import _DefaultRandom
+    fails = 0
+    for trial in range(n_cases):
+        seed = rng.randint(-2_000_000_000, 2_000_000_000)
+        agility = rng.randint(0, 1500)
+        # Python side: same formula as Fight.generateCritical.
+        py_rng = _DefaultRandom()
+        py_rng.seed(seed)
+        py_crit = py_rng.get_double() < (agility / 1000.0)
+
+        s = make_c_state(1000, 1000, 1000, 1000,
+                          {AGILITY: agility}, {})
+        # Re-seed the C state's RNG to match the Python one we just used.
+        s._set_rng(seed)
+        c_crit = s._roll_critical(0)
+
+        if int(py_crit) != c_crit:
+            fails += 1
+            if fails <= 3:
+                print(f"  crit trial {trial}: seed={seed} ag={agility} "
+                      f"C={c_crit} PY={int(py_crit)}")
+    return fails
+
+
 def fuzz_total_debuff_populated(n_cases, rng):
     from leekwars.effect.effect_total_debuff import EffectTotalDebuff
     fails = 0
@@ -1705,6 +1733,8 @@ def main():
         ("poison_tick",             fuzz_poison_tick),
         ("aftereffect_tick",        fuzz_aftereffect_tick),
         ("heal_tick",               fuzz_heal_tick),
+        # randomness primitives
+        ("critical_roll",           fuzz_critical_roll),
     ]
 
     total_fails = 0
