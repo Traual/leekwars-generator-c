@@ -1469,6 +1469,114 @@ def fuzz_debuff_populated(n_cases, rng):
     return fails
 
 
+def fuzz_multi_turn_buff_lifetime(n_cases, rng):
+    """End-to-end turn-driver test: cast a buff on B with turns=N,
+    then run N+2 turns of (A.startTurn -> B.startTurn) on both
+    engines. Verify that buff persists exactly N turns and that
+    buff_stats unwinds at the right moment.
+
+    This catches the 'decrement-on-caster's-startTurn' timing fix
+    that the per-effect parity tests can't see (they call _tick_X
+    directly without going through the turn driver)."""
+    from leekwars.effect.effect import Effect
+    fails = 0
+    n_cases = min(n_cases, 500)  # multi-turn tests are slower
+    for trial in range(n_cases):
+        n_turns = rng.randint(1, 4)
+        v1 = rng.uniform(20, 80); v2 = rng.uniform(20, 80); jet = rng.uniform(0, 1)
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        eff_type = 3  # BUFF_STRENGTH (science-scaled)
+
+        # ---- Python ----
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        py_caster.launchedEffects = []
+        py_target.launchedEffects = []
+        # Patch addLaunchedEffect to actually track on the entity.
+        def make_track(_self):
+            def add_launched(eff):
+                _self.launchedEffects.append(eff)
+            return add_launched
+        py_caster.addLaunchedEffect = make_track(py_caster)
+        py_target.addLaunchedEffect = make_track(py_target)
+
+        class _Attack:
+            def __init__(self, item_id):
+                self._iid = item_id
+            def getItemId(self): return self._iid
+            def getType(self): return 2
+            def getItem(self): return None
+        atk = _Attack(1)
+        st = MockState()
+        Effect.createEffect(st, eff_type, n_turns, 1.0, v1, v2,
+                              False, py_target, py_caster, atk, jet,
+                              False, 0, 1, 0, 0)
+
+        # ---- C ----
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._effect_create({
+            "type": eff_type, "caster_idx": 0, "target_idx": 1,
+            "value1": v1, "value2": v2, "jet": jet,
+            "turns": n_turns, "aoe": 1.0, "critical": 0,
+            "attack_id": 1, "modifiers": 0, "target_count": 1,
+        })
+
+        # Verify initial state matches.
+        errs = compare_states(s, py_caster, py_target,
+                                "multi_turn[t0]", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  multi_turn t0 trial {trial}: {errs[:3]}")
+            continue
+
+        # Now run turns. Python: simulate the per-entity startTurn /
+        # endTurn cycle by calling the relevant logic directly. We
+        # don't have a Fight wrapper, so emulate the loop:
+        #   each round: A.startTurn (decrement A.launchedEffects),
+        #               B.startTurn (decrement B.launchedEffects).
+        # We don't tick BUFF_STRENGTH (no applyStartTurn) so this is
+        # purely a decrement test.
+
+        def py_start_turn(entity):
+            # Decrement entity.launchedEffects, removing 0-turns ones.
+            ec = list(entity.launchedEffects)
+            for e in ec:
+                if e.turns != -1:
+                    e.turns -= 1
+                if e.turns == 0:
+                    e.target.removeEffect(e)
+                    entity.launchedEffects.remove(e)
+
+        ok = True
+        for round_i in range(n_turns + 2):
+            # A then B per round, mirroring lw_next_entity_turn order.
+            py_start_turn(py_caster)
+            s.entity_start_turn(0)
+
+            errs = compare_states(s, py_caster, py_target,
+                                    f"multi_turn[r{round_i}.A]", trial)
+            if errs:
+                fails += 1
+                ok = False
+                if fails <= 3:
+                    print(f"  multi_turn r{round_i}.A trial {trial} "
+                          f"(n_turns={n_turns}): {errs[:3]}")
+                break
+
+            py_start_turn(py_target)
+            s.entity_start_turn(1)
+
+            errs = compare_states(s, py_caster, py_target,
+                                    f"multi_turn[r{round_i}.B]", trial)
+            if errs:
+                fails += 1
+                ok = False
+                if fails <= 3:
+                    print(f"  multi_turn r{round_i}.B trial {trial}: {errs[:3]}")
+                break
+    return fails
+
+
 def fuzz_resurrect(n_cases, rng):
     """Entity.resurrect: reset hp + total_hp based on factor + fullLife.
     The parity test calls Python's Entity.resurrect directly on a mock
@@ -1903,6 +2011,7 @@ def main():
         # createEffect stacking + replacement (calls dispatcher twice)
         ("create_effect_stack",     fuzz_create_effect_stacking),
         ("resurrect",               fuzz_resurrect),
+        ("multi_turn_buff",         fuzz_multi_turn_buff_lifetime),
     ]
 
     total_fails = 0
