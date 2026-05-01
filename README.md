@@ -48,29 +48,39 @@ this C port is being built bottom-up alongside parity tests.
 | Action-stream JSON output                 | ❌ TODO |
 | Resurrect / Summon (entity allocation)    | ❌ TODO |
 | Passive event hooks (POISON_TO_*, etc.)   | ❌ TODO |
-| Effect.createEffect stacking/replacement  | ❌ TODO (dispatcher just appends; no merge for stackable, no replace for non-stackable) |
+| Effect.createEffect stacking/replacement  | ✅ done — pre-apply removal of existing same-(id, attack_id) entry for non-stackable, post-apply merge with same-(id, attack_id, turns, caster) for stackable |
 
 ## Microbench (Python -> C, 5x5 toy state)
 
 ```
-Clone         (C, memcpy + pool):    68 us / call
+Clone         (C, memcpy + pool):    67 us / call
 legal_actions (C):                   1.4 us / call
 extract_mlp   (C, zero-copy):        0.3 us / call
-
-For comparison the Python reference engine is:
-Clone:                              ~150 us / call
-legal_actions:                      ~1500 us / call (post-optim)
-extract_mlp:                        ~100 us / call (Cython entity_token)
-
-Speedup on the AI's per-state inner loop: ~25x.
 ```
 
-For a beam-search turn (3000 states evaluated):
+## End-to-end benchmark (full 1v1 fights, basic-AI vs basic-AI)
+
+`bindings/python/bench_compare.py` drives the same workload through
+the C engine and the upstream Python `leekwars-generator-python`:
 
 ```
-Pure Python : ~5 200 ms
-C inner loop:   ~210 ms
+RNG draws/sec:
+  Python:      1,867,543 / s
+  C:          39,843,665 / s
+  Speedup: 21x
+
+Full 1v1 fights (200 each side):
+  Python:    386 fights/sec    2.57 ms/fight    65 turns   173k actions/sec
+  C:      55,689 fights/sec   17.8 us/fight   19.5 turns  2.20M actions/sec
+
+  Per-fight raw speedup:                  144x
+  Per-turn speedup (turn-count adjusted):  43x
+  Per-action speedup:                      13x
 ```
+
+The Python side still has more bookkeeping (action-stream emission,
+catalog JSON loader, full statistics manager); the C engine skips
+those for AI search workloads.
 
 ## Architecture
 

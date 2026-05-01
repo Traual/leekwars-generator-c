@@ -1,9 +1,12 @@
 /*
- * lw_attack_apply.c -- byte-for-byte attack execution glue.
+ * lw_attack_apply.c -- byte-for-byte attack execution glue + passive
+ * event hooks (onDirectDamage / onPoisonDamage / onNovaDamage /
+ * onMoved / onAllyKilled / onCritical / onKill).
  */
 
 #include "lw_attack_apply.h"
 #include "lw_area.h"
+#include "lw_catalog.h"
 #include "lw_critical.h"
 #include "lw_effect_dispatch.h"
 #include "lw_effect.h"
@@ -203,4 +206,210 @@ int lw_apply_attack_full(LwState *state,
      * lw_action.c will subtract). */
 
     return total_damage;
+}
+
+
+/* ---- Passive event hooks ---------------------------------------- */
+
+/* Walk an entity's weapons, look up each via the catalog, and call
+ * ``visit`` on every passive whose type is in the matching set. The
+ * visitor decides what to dispatch (each event has its own logic
+ * because the resulting createEffect call differs in target type). */
+typedef void (*passive_visit_fn)(LwState *state, int entity_idx,
+                                  const LwPassiveEffectSpec *p,
+                                  int input_value, int weapon_item_id);
+
+static void walk_passives(LwState *state, int entity_idx,
+                           passive_visit_fn visit, int input_value) {
+    if (state == NULL) return;
+    if (entity_idx < 0 || entity_idx >= state->n_entities) return;
+    const LwEntity *e = &state->entities[entity_idx];
+    if (!e->alive) return;
+    for (int wi = 0; wi < e->n_weapons; wi++) {
+        int item_id = e->weapons[wi];
+        const LwAttackSpec *spec = lw_catalog_get(item_id);
+        if (spec == NULL) continue;
+        for (int pi = 0; pi < spec->n_passives; pi++) {
+            visit(state, entity_idx, &spec->passives[pi], input_value, item_id);
+        }
+    }
+}
+
+
+/* Helper: dispatch a passive into Effect.createEffect on the given
+ * target (always self for the on-X events) with the right TYPE_*. */
+static void fire_passive_buff(LwState *state, int entity_idx,
+                              const LwPassiveEffectSpec *p,
+                              int target_buff_type,
+                              double v1, double v2,
+                              int item_id) {
+    LwEffectInput in = {0};
+    in.type = target_buff_type;
+    in.caster_idx = entity_idx;
+    in.target_idx = entity_idx;
+    in.value1 = v1;
+    in.value2 = v2;
+    in.jet = 0.0;
+    in.turns = p->turns;
+    in.aoe = 1.0;
+    in.critical = 0;
+    in.attack_id = item_id;
+    in.modifiers = p->modifiers;
+    in.previous_value = 0;
+    in.target_count = 1;
+    lw_effect_create(state, &in);
+}
+
+
+/* on_direct_damage: walks passives on the DAMAGED entity's weapons
+ * (they react to incoming damage). For DAMAGE_TO_ABSOLUTE_SHIELD
+ * fires RAW_ABSOLUTE_SHIELD; for DAMAGE_TO_STRENGTH fires
+ * RAW_BUFF_STRENGTH. */
+static void visit_on_direct_damage(LwState *state, int entity_idx,
+                                    const LwPassiveEffectSpec *p,
+                                    int input_value, int item_id) {
+    if (p->type == LW_EFFECT_DAMAGE_TO_ABSOLUTE_SHIELD) {
+        double v = (double)input_value * (p->value1 / 100.0);
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_ABSOLUTE_SHIELD, v, 0, item_id);
+    } else if (p->type == LW_EFFECT_DAMAGE_TO_STRENGTH) {
+        double v = (double)input_value * (p->value1 / 100.0);
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_BUFF_STRENGTH, v, 0, item_id);
+    }
+}
+
+void lw_event_on_direct_damage(LwState *state, int entity_idx, int value) {
+    if (value <= 0) return;
+    walk_passives(state, entity_idx, visit_on_direct_damage, value);
+}
+
+
+/* on_poison_damage: POISON_TO_SCIENCE -> RAW_BUFF_SCIENCE. */
+static void visit_on_poison_damage(LwState *state, int entity_idx,
+                                    const LwPassiveEffectSpec *p,
+                                    int input_value, int item_id) {
+    if (p->type == LW_EFFECT_POISON_TO_SCIENCE) {
+        double v = (double)input_value * (p->value1 / 100.0);
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_BUFF_SCIENCE, v, 0, item_id);
+    }
+}
+
+void lw_event_on_poison_damage(LwState *state, int entity_idx, int value) {
+    if (value <= 0) return;
+    walk_passives(state, entity_idx, visit_on_poison_damage, value);
+}
+
+
+/* on_nova_damage: NOVA_DAMAGE_TO_MAGIC -> RAW_BUFF_MAGIC. */
+static void visit_on_nova_damage(LwState *state, int entity_idx,
+                                  const LwPassiveEffectSpec *p,
+                                  int input_value, int item_id) {
+    if (p->type == LW_EFFECT_NOVA_DAMAGE_TO_MAGIC) {
+        double v = (double)input_value * (p->value1 / 100.0);
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_BUFF_MAGIC, v, 0, item_id);
+    }
+}
+
+void lw_event_on_nova_damage(LwState *state, int entity_idx, int value) {
+    if (value <= 0) return;
+    walk_passives(state, entity_idx, visit_on_nova_damage, value);
+}
+
+
+/* on_moved: MOVED_TO_MP -> RAW_BUFF_MP. Only fires if mover != caster. */
+static void visit_on_moved(LwState *state, int entity_idx,
+                            const LwPassiveEffectSpec *p,
+                            int input_value, int item_id) {
+    (void)input_value;
+    if (p->type == LW_EFFECT_MOVED_TO_MP) {
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_BUFF_MP, p->value1, 0, item_id);
+    }
+}
+
+void lw_event_on_moved(LwState *state, int entity_idx, int caster_idx) {
+    if (caster_idx == entity_idx) return;  /* Python skips self-moves. */
+    walk_passives(state, entity_idx, visit_on_moved, 0);
+}
+
+
+/* on_critical: CRITICAL_TO_HEAL -> RAW_HEAL (turns=0). */
+static void visit_on_critical(LwState *state, int entity_idx,
+                               const LwPassiveEffectSpec *p,
+                               int input_value, int item_id) {
+    (void)input_value;
+    if (p->type == LW_EFFECT_CRITICAL_TO_HEAL) {
+        /* Python skips if at full life. */
+        const LwEntity *e = &state->entities[entity_idx];
+        if (e->hp >= e->total_hp) return;
+        /* Python rolls a fresh jet for the heal. We inherit the
+         * caller's RNG state. */
+        double jet = lw_rng_double(&state->rng_n);
+        LwEffectInput in = {0};
+        in.type = LW_EFFECT_RAW_HEAL;
+        in.caster_idx = entity_idx;
+        in.target_idx = entity_idx;
+        in.value1 = p->value1;
+        in.value2 = p->value2;
+        in.jet = jet;
+        in.turns = 0;
+        in.aoe = 1.0;
+        in.critical = 0;
+        in.attack_id = item_id;
+        in.modifiers = p->modifiers;
+        in.target_count = 1;
+        lw_effect_create(state, &in);
+    }
+}
+
+void lw_event_on_critical(LwState *state, int entity_idx) {
+    walk_passives(state, entity_idx, visit_on_critical, 0);
+}
+
+
+/* on_kill: KILL_TO_TP -> RAW_BUFF_TP. */
+static void visit_on_kill(LwState *state, int entity_idx,
+                           const LwPassiveEffectSpec *p,
+                           int input_value, int item_id) {
+    (void)input_value;
+    if (p->type == LW_EFFECT_KILL_TO_TP) {
+        /* Python uses `value1, value1` for v1+v2 (matches its source). */
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_BUFF_TP, p->value1, p->value1,
+                           item_id);
+    }
+}
+
+void lw_event_on_kill(LwState *state, int killer_idx) {
+    walk_passives(state, killer_idx, visit_on_kill, 0);
+}
+
+
+/* on_ally_killed: ALLY_KILLED_TO_AGILITY -> RAW_BUFF_AGILITY for each
+ * ALIVE ally of the dead entity. */
+static void visit_on_ally_killed(LwState *state, int entity_idx,
+                                  const LwPassiveEffectSpec *p,
+                                  int input_value, int item_id) {
+    (void)input_value;
+    if (p->type == LW_EFFECT_ALLY_KILLED_TO_AGILITY) {
+        fire_passive_buff(state, entity_idx, p,
+                           LW_EFFECT_RAW_BUFF_AGILITY, p->value1, 0,
+                           item_id);
+    }
+}
+
+void lw_event_on_ally_killed(LwState *state, int dead_idx) {
+    if (state == NULL) return;
+    if (dead_idx < 0 || dead_idx >= state->n_entities) return;
+    int dead_team = state->entities[dead_idx].team_id;
+    for (int i = 0; i < state->n_entities; i++) {
+        if (i == dead_idx) continue;
+        const LwEntity *e = &state->entities[i];
+        if (!e->alive) continue;
+        if (e->team_id != dead_team) continue;
+        walk_passives(state, i, visit_on_ally_killed, 0);
+    }
 }

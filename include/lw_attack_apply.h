@@ -41,7 +41,20 @@ typedef struct {
     int    modifiers;        /* LW_MODIFIER_* bitmask */
 } LwAttackEffectSpec;
 
-/* A full attack profile with multiple effects. */
+/* A passive-effect spec attached to a weapon. Mirrors what Python's
+ * Weapon.getPassiveEffects() returns. Each entry's ``type`` is one of
+ * the passive marker effect ids (POISON_TO_SCIENCE, DAMAGE_TO_*,
+ * MOVED_TO_MP, ALLY_KILLED_TO_AGILITY, KILL_TO_TP, CRITICAL_TO_HEAL).
+ */
+typedef struct {
+    int    type;             /* LW_EFFECT_* (passive marker id) */
+    double value1, value2;
+    int    turns;
+    int    modifiers;
+} LwPassiveEffectSpec;
+
+/* A full attack profile with multiple effects + optional weapon
+ * passives that fire on damage/poison/move/etc. events. */
 typedef struct {
     int  attack_type;        /* 1 = weapon, 2 = chip */
     int  item_id;
@@ -52,7 +65,33 @@ typedef struct {
     int  tp_cost;
     int  n_effects;
     LwAttackEffectSpec effects[8];
+    int  n_passives;
+    LwPassiveEffectSpec passives[4];
 } LwAttackSpec;
+
+
+/* ---- Passive event hooks --------------------------------------------
+ *
+ * Mirror Entity.onDirectDamage / onPoisonDamage / onNovaDamage /
+ * onMoved / onAllyKilled / onCritical / onKill in Python. Each event
+ * walks the entity's weapons (lw_catalog_get(entity.weapons[i])) and
+ * for each registered passive whose type matches the event,
+ * dispatches it via Effect.createEffect with the right TYPE_RAW_BUFF_*
+ * target.
+ *
+ * Calling sites: damage/aftereffect apply paths fire on_direct_damage,
+ * poison tick fires on_poison_damage, nova damage erosion fires
+ * on_nova_damage, slide path fires on_moved (if mover != caster),
+ * kill apply path fires on_kill (and on_ally_killed for allies of
+ * the killed).
+ */
+void lw_event_on_direct_damage(LwState *state, int entity_idx, int value);
+void lw_event_on_poison_damage(LwState *state, int entity_idx, int value);
+void lw_event_on_nova_damage(LwState *state, int entity_idx, int value);
+void lw_event_on_moved(LwState *state, int entity_idx, int caster_idx);
+void lw_event_on_critical(LwState *state, int entity_idx);
+void lw_event_on_kill(LwState *state, int killer_idx);
+void lw_event_on_ally_killed(LwState *state, int dead_idx);
 
 /*
  * Run the full attack from caster_idx on target_cell_id.
