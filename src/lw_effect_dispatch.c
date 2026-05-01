@@ -107,6 +107,9 @@ static void register_entry(LwState *state, const LwEffectInput *p,
     /* Try stacking first (matches Python's order: stacking check runs
      * before the new-entry add). */
     if (try_stack(state, p, effect_type, value, stat_index, stat_sign)) {
+        lw_action_emit(state, LW_ACT_STACK_EFFECT,
+                        p->caster_idx, p->target_idx,
+                        value, effect_type, p->attack_id);
         return;
     }
 
@@ -130,6 +133,9 @@ static void register_entry(LwState *state, const LwEffectInput *p,
         e.stats[stat_index] = value * stat_sign;
     }
     lw_effect_add(&state->entities[p->target_idx], &e);
+    lw_action_emit(state, LW_ACT_ADD_EFFECT,
+                    p->caster_idx, p->target_idx,
+                    value, effect_type, p->attack_id);
 }
 
 

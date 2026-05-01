@@ -13,6 +13,7 @@
  */
 
 #include "lw_summon.h"
+#include "lw_action_stream.h"
 #include <math.h>
 #include <string.h>
 
@@ -143,6 +144,8 @@ int lw_apply_summon(LwState *state,
 
     state->n_entities++;
     state->map.entity_at_cell[dest_cell] = new_idx;
+    lw_action_emit(state, LW_ACT_INVOCATION, caster_idx, new_idx,
+                    bulb_id, dest_cell, critical);
 
     /* Insert into initial_order RIGHT AFTER the caster. Python's
      * Order.addSummon(owner, invoc) does the same. */

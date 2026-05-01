@@ -148,6 +148,8 @@ int lw_entity_start_turn(LwState *state, int entity_idx) {
     e->used_tp = 0;
     e->used_mp = 0;
 
+    lw_action_emit(state, LW_ACT_START_TURN, entity_idx, -1, 0, 0, 0);
+
     /* Tick effects ON this entity (poison/aftereffect/heal). */
     int net_damage = lw_turn_start(state, entity_idx);
 

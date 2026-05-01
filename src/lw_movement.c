@@ -111,11 +111,14 @@ int lw_apply_slide(LwState *state, int entity_idx, int dest_cell) {
 
     if (e->cell_id == dest_cell) return 0;
 
+    int from_cell = e->cell_id;
     if (e->cell_id >= 0) {
         state->map.entity_at_cell[e->cell_id] = -1;
     }
     state->map.entity_at_cell[dest_cell] = entity_idx;
     e->cell_id = dest_cell;
+    lw_action_emit(state, LW_ACT_SLIDE, entity_idx, dest_cell,
+                    from_cell, 0, 0);
     return 1;
 }
 
@@ -129,11 +132,14 @@ int lw_apply_teleport(LwState *state, int entity_idx, int dest_cell) {
 
     if (e->cell_id == dest_cell) return 0;
 
+    int from_cell = e->cell_id;
     if (e->cell_id >= 0) {
         state->map.entity_at_cell[e->cell_id] = -1;
     }
     state->map.entity_at_cell[dest_cell] = entity_idx;
     e->cell_id = dest_cell;
+    lw_action_emit(state, LW_ACT_TELEPORT, entity_idx, dest_cell,
+                    from_cell, 0, 0);
     return 1;
 }
 

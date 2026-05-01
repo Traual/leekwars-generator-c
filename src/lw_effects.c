@@ -264,6 +264,11 @@ int lw_apply_vitality(LwState *state,
      * entity's max HP grows AND current HP grows. */
     target->total_hp += amount;
     target->hp       += amount;
+    if (amount > 0) {
+        lw_action_emit(state, LW_ACT_VITALITY, caster_idx, target_idx,
+                        amount, 0, 0);
+    }
+    (void)caster;
     return amount;
 }
 
@@ -293,6 +298,11 @@ int lw_apply_nova_vitality(LwState *state,
     /* Python: addTotalLife only (no addLife) -- max HP grows, current
      * HP unchanged. */
     target->total_hp += amount;
+    if (amount > 0) {
+        lw_action_emit(state, LW_ACT_NOVA_VITALITY, caster_idx, target_idx,
+                        amount, 0, 0);
+    }
+    (void)caster;
     return amount;
 }
 
@@ -619,6 +629,8 @@ int lw_apply_add_state(LwState *state, int target_idx, uint32_t state_flag) {
     if (target_idx < 0 || target_idx >= state->n_entities) return 0;
     LwEntity *target = &state->entities[target_idx];
     target->state_flags |= state_flag;
+    lw_action_emit(state, LW_ACT_ADD_STATE, target_idx, -1,
+                    (int)state_flag, 0, 0);
     return 1;
 }
 
@@ -686,6 +698,8 @@ int lw_apply_resurrect(LwState *state,
     t->state_flags |= LW_STATE_RESURRECTED;
     t->cell_id = dest_cell;
     state->map.entity_at_cell[dest_cell] = target_idx;
+    lw_action_emit(state, LW_ACT_RESURRECT, target_idx, dest_cell,
+                    full_life, critical, 0);
     return 1;
 }
 
