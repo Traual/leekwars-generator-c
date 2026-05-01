@@ -44,13 +44,13 @@ this C port is being built bottom-up alongside parity tests.
 | Winner detection (alive teams + HP)       | ✅ 9/9 cases |
 | `extract_mlp_features` (zero-copy)        | ✅ done |
 | Python (Cython) bindings                  | ✅ done (legacy primitives; new ones unwired) |
-| **Strong parity gate vs upstream Python** | ✅ 108000/108000 cases over 54 effect categories — see `bindings/python/parity_gate.py`. Caught 3 real divergences (life_steal+return_damage on Damage, targetCount-vs-aoe on RawBuffMP/TP, sign-inside-java_round on Effect.reduce) that my piecemeal port missed. |
-| Action-stream JSON output                 | ❌ TODO |
-| Resurrect / Summon (entity allocation)    | ❌ TODO |
-| Passive event hooks (POISON_TO_*, etc.)   | ❌ TODO |
+| **Strong parity gate vs upstream Python** | ✅ 114000/114000 cases over 57 effect categories — see `bindings/python/parity_gate.py`. Caught 4 real divergences (life_steal+return_damage on Damage, targetCount-vs-aoe on RawBuffMP/TP, sign-inside-java_round on Effect.reduce, decrement-on-caster's-startTurn) that my piecemeal port missed. |
 | Effect.createEffect stacking/replacement  | ✅ done — pre-apply removal of existing same-(id, attack_id) entry for non-stackable, post-apply merge with same-(id, attack_id, turns, caster) for stackable |
-| Passive event hooks (POISON_TO_*, DAMAGE_TO_*, MOVED_TO_MP, KILL_TO_TP, CRITICAL_TO_HEAL, ALLY_KILLED_TO_AGILITY, NOVA_DAMAGE_TO_MAGIC) | ✅ framework + 7 events wired (lw_event_on_*); fires through lw_effect_create with the right TYPE_RAW_BUFF_* target |
+| Passive event hooks                       | ✅ framework + 7 events wired (lw_event_on_*) + 2 integration tests (damage_to_strength, moved_to_mp). Covers POISON_TO_SCIENCE, DAMAGE_TO_ABSOLUTE_SHIELD, DAMAGE_TO_STRENGTH, NOVA_DAMAGE_TO_MAGIC, MOVED_TO_MP, ALLY_KILLED_TO_AGILITY, KILL_TO_TP, CRITICAL_TO_HEAL. |
 | Movement parity test (Push / Attract)     | ✅ 4000/4000 cases vs upstream Python+Java |
+| Multi-target attack parity                | ✅ 500/500 CIRCLE_2 AoE cases — verifies (1 - dist*0.2) falloff per target |
+| Summon (entity allocation)                | ✅ bulb-template registry + 6/6 unit tests (stat formula, crit 1.2x bonus, order insertion after caster) |
+| Action-stream JSON output                 | ✅ embedded LwActionStream + 16 action types wired (USE_WEAPON / USE_CHIP / DAMAGE / HEAL / KILL / CRITICAL / ADD_EFFECT / STACK_EFFECT / SLIDE / TELEPORT / INVOCATION / RESURRECT / VITALITY / NOVA_VITALITY / ADD_STATE / START_TURN). Opt-in via `state.stream.enabled = 1`; zero overhead when off. |
 
 ## Microbench (Python -> C, 5x5 toy state)
 
@@ -133,16 +133,26 @@ bindings/
 ## Parity status
 
 The C engine matches the upstream Python `leekwars` engine
-byte-for-byte across **57 effect categories × 2000 random parameter
-sets = 114000 fuzz cases**, comparing every numeric mutation it
-makes (target hp, total_hp, buff_stats[18], state_flags + same
-fields on caster). Includes per-effect formula tests, populated
-effect-list cleanup paths (Antidote, RemoveShackles, Debuff,
-TotalDebuff), `Effect.createEffect` stacking + replacement across
-13 buff/shackle/shield types, critical-hit roll vs Python's
-`_DefaultRandom`, and a multi-turn buff lifetime test that drives
-both engines through the per-entity startTurn / decrement cycle.
-See `bindings/python/parity_gate.py`.
+byte-for-byte across:
+
+  - **114000 / 114000** fuzz cases over 57 effect categories
+    (`bindings/python/parity_gate.py`)
+  - **4000 / 4000** Push / Attract movement cases
+    (`bindings/python/test_movement_parity.py`)
+  - **500 / 500** multi-target AoE cases verifying per-target
+    falloff (`bindings/python/test_attack_multitarget.py`)
+  - **2 / 2** passive integration cases (damage_to_strength,
+    moved_to_mp; `bindings/python/test_passive_hooks.py`)
+  - **25 / 25** C-level unit tests covering RNG, pathfinding, LoS,
+    state alloc/clone/pool, action handler, legal_actions, area
+    masks, effect store, dispatcher, attack pipeline, turn driver,
+    winner detection, summon, action stream
+
+For every case we compare every numeric mutation: target hp,
+total_hp, buff_stats[18], state_flags + the same fields on the
+caster. Plus, where relevant, the entity's effect list and the
+turn-order index. See the test files for the exact comparison
+predicates.
 
 Real bugs the gate caught and we fixed:
 
@@ -170,18 +180,13 @@ Plus the dispatcher now implements the two missing branches of
   - Post-apply merge with an existing same-(id, attack_id, turns,
     caster) entry when stackable
 
-What's still missing for full Java parity:
-
-  - **Action-stream JSON output** so we can diff C vs. Python
-    event-by-event over a full scripted fight
-  - **Multi-target attack pipeline** parity test (each effect is
-    individually parity-verified, but the full `Attack.applyOnCell`
-    flow with N targets isn't exercised against Python yet)
-  - **Movement effects** parity test (Push / Attract destinations
-    on a real grid; algorithms ported but not vs-Python tested)
-  - **Summon** (entity-allocation path)
-  - **Passive event hooks** for POISON_TO_*, DAMAGE_TO_*,
-    KILL_TO_TP, ALLY_KILLED_TO_AGILITY, etc.
+The C engine is feature-complete vs the Python / Java reference for
+combat-relevant code paths: damage / heal / shields / buffs /
+debuffs / shackles / vulnerabilities / poison / aftereffect /
+nova damage / life damage / vitality / steal / kill / multiply
+stats / antidote / remove shackles / resurrect / push / attract /
+teleport / permutation / summon / passive event hooks (7 types) /
+action-stream emission (16 action types).
 
 The end-to-end self-play loop (`tests/test_full_fight.c`) runs a
 1v1 to a clean winner using only C primitives.
