@@ -276,6 +276,10 @@ cdef extern from "lw_effects.h":
     int lw_apply_resurrect(LwState *state, int target_idx, int dest_cell,
                            int full_life, int critical)
 
+    int lw_tick_poison(LwState *state, int target_idx, int per_turn_damage)
+    int lw_tick_aftereffect(LwState *state, int target_idx, int per_turn_damage)
+    int lw_tick_heal(LwState *state, int target_idx, int per_turn_heal)
+
 
 # --- Python-side constants -------------------------------------------
 
@@ -769,6 +773,15 @@ cdef class State:
 
     def _apply_erosion(self, int target_idx, int value, double rate):
         return lw_apply_erosion(self._s, target_idx, value, rate)
+
+    def _tick_poison(self, int target_idx, int per_turn):
+        return lw_tick_poison(self._s, target_idx, per_turn)
+
+    def _tick_aftereffect(self, int target_idx, int per_turn):
+        return lw_tick_aftereffect(self._s, target_idx, per_turn)
+
+    def _tick_heal(self, int target_idx, int per_turn):
+        return lw_tick_heal(self._s, target_idx, per_turn)
 
     def extract_mlp_features(self, int my_team, out):
         """Fill ``out`` (a 256-element float32 buffer, typically a numpy

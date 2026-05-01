@@ -1270,6 +1270,103 @@ def fuzz_debuff_empty(n_cases, rng):
     return fails
 
 
+def fuzz_poison_tick(n_cases, rng):
+    """applyStartTurn for EffectPoison: target takes self.value damage
+    each turn, with INVINCIBLE -> 0 and erosion."""
+    from leekwars.effect.effect_poison import EffectPoison
+    fails = 0
+    for trial in range(n_cases):
+        per_turn = rng.randint(1, 500)
+        target_invincible = rng.random() < 0.10
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        target_hp = rng.randint(50, 5000); target_total = max(target_hp, 5000)
+        c_target_state = STATE_INVINCIBLE if target_invincible else 0
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts,
+            target_state_flags=c_target_state)
+        e = EffectPoison()
+        # erosionRate=0 to match my C lw_tick_poison which doesn't apply erosion.
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0,
+                            erosion_rate=0.0)
+        e.value = per_turn
+        e.caster = py_caster; e.target = py_target
+        e.applyStartTurn(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total,
+                          cs, ts, target_state_flags=c_target_state)
+        s._tick_poison(1, per_turn)
+
+        errs = compare_states(s, py_caster, py_target, "poison_tick", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  poison_tick trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_aftereffect_tick(n_cases, rng):
+    """applyStartTurn for EffectAftereffect: same shape as poison tick."""
+    from leekwars.effect.effect_aftereffect import EffectAftereffect
+    fails = 0
+    for trial in range(n_cases):
+        per_turn = rng.randint(1, 500)
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        target_hp = rng.randint(50, 5000); target_total = max(target_hp, 5000)
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts)
+        e = EffectAftereffect()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0,
+                            erosion_rate=0.0)
+        e.value = per_turn
+        e.caster = py_caster; e.target = py_target
+        e.applyStartTurn(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total, cs, ts)
+        s._tick_aftereffect(1, per_turn)
+
+        errs = compare_states(s, py_caster, py_target, "aftereffect_tick", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  aftereffect_tick trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_heal_tick(n_cases, rng):
+    """applyStartTurn for EffectHeal: target heals self.value each turn,
+    capped at missing HP, blocked by UNHEALABLE."""
+    from leekwars.effect.effect_heal import EffectHeal
+    fails = 0
+    for trial in range(n_cases):
+        per_turn = rng.randint(1, 500)
+        target_unhealable = rng.random() < 0.10
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        target_hp = rng.randint(50, 4000); target_total = rng.randint(target_hp, 5000)
+        c_target_state = STATE_UNHEALABLE if target_unhealable else 0
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts,
+            target_state_flags=c_target_state)
+        e = EffectHeal()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.value = per_turn
+        e.caster = py_caster; e.target = py_target
+        e.applyStartTurn(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total,
+                          cs, ts, target_state_flags=c_target_state)
+        s._tick_heal(1, per_turn)
+
+        errs = compare_states(s, py_caster, py_target, "heal_tick", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  heal_tick trial {trial}: {errs[:3]}")
+    return fails
+
+
 def fuzz_total_debuff_empty(n_cases, rng):
     from leekwars.effect.effect_total_debuff import EffectTotalDebuff
     fails = 0
@@ -1385,6 +1482,10 @@ def main():
         ("remove_shackles (empty)", fuzz_remove_shackles_empty),
         ("debuff (empty)",          fuzz_debuff_empty),
         ("total_debuff (empty)",    fuzz_total_debuff_empty),
+        # applyStartTurn ticks
+        ("poison_tick",             fuzz_poison_tick),
+        ("aftereffect_tick",        fuzz_aftereffect_tick),
+        ("heal_tick",               fuzz_heal_tick),
     ]
 
     total_fails = 0
