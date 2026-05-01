@@ -1470,70 +1470,72 @@ def fuzz_debuff_populated(n_cases, rng):
 
 
 def fuzz_create_effect_stacking(n_cases, rng):
-    """Apply BUFF_STRENGTH twice via Effect.createEffect / lw_effect_create
-    on the same target with same (id, attack, turns, caster). The second
-    application should MERGE into the first entry, not create a new one.
-
-    Verifies the just-added stacking + replacement logic in
-    lw_effect_dispatch.c matches Python's Effect.createEffect semantics."""
+    """Apply random effect types twice via Effect.createEffect /
+    lw_effect_create on the same target with same (id, attack, turns,
+    caster). Verifies stacking + replacement match Python."""
     from leekwars.effect.effect import Effect
+    # Tuples of (TYPE_*, "label") that we exercise. Limited to
+    # buffs/shackles/shields where stacking semantics are well-defined.
+    EFFECT_CHOICES = [
+        (3,  "BUFF_STRENGTH"),
+        (4,  "BUFF_AGILITY"),
+        (5,  "RELATIVE_SHIELD"),
+        (6,  "ABSOLUTE_SHIELD"),
+        (7,  "BUFF_MP"),
+        (8,  "BUFF_TP"),
+        (19, "SHACKLE_STRENGTH"),
+        (20, "DAMAGE_RETURN"),
+        (21, "BUFF_RESISTANCE"),
+        (22, "BUFF_WISDOM"),
+        (24, "SHACKLE_MAGIC"),
+        (47, "SHACKLE_AGILITY"),
+        (48, "SHACKLE_WISDOM"),
+    ]
     fails = 0
     for trial in range(n_cases):
+        eff_type, _ = rng.choice(EFFECT_CHOICES)
         v1_a = rng.uniform(0, 50); v2_a = rng.uniform(0, 50); jet = rng.uniform(0, 1)
         v1_b = rng.uniform(0, 50); v2_b = rng.uniform(0, 50)
         aoe = rng.choice([1.0, 0.8])
         crit = rng.choice([0, 1])
-        crit_pwr = 1.3 if crit else 1.0
         target_count = rng.choice([1, 2])
         turns = rng.randint(1, 5)
         attack_id = rng.choice([1, 2, 3])
-        # Stackable flag: bit 1 of modifiers = MODIFIER_STACKABLE
         stackable = rng.random() < 0.5
         modifiers = 1 if stackable else 0
         cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
 
-        # ---- Python side: two consecutive Effect.createEffect calls ----
-        # We build a synthetic State that exposes only what createEffect
-        # touches: target with effects + addEffect/getEffects, caster
-        # with addLaunchedEffect, and a state.statistics + state.getActions.
         py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
 
-        # MockEntity needs a real `effects` list so addEffect / getEffects work.
-        # mergeWith uses self.attack.getItemId() so we wrap attack into a
-        # struct Python can compare.
         class _Attack:
             def __init__(self, item_id):
                 self._iid = item_id
             def getItemId(self): return self._iid
-            def getType(self): return 2  # CHIP
+            def getType(self): return 2
             def getItem(self): return None
 
         atk_obj_py = _Attack(attack_id)
-        TYPE_BUFF_STR = 3   # Effect.TYPE_BUFF_STRENGTH
 
         st = MockState()
-        # First call
-        v_a = Effect.createEffect(st, TYPE_BUFF_STR, turns, aoe, v1_a, v2_a,
+        v_a = Effect.createEffect(st, eff_type, turns, aoe, v1_a, v2_a,
                                     bool(crit), py_target, py_caster,
                                     atk_obj_py, jet, stackable, 0,
                                     target_count, 0, modifiers)
-        # Second call (same target, same caster, same attack object)
-        v_b = Effect.createEffect(st, TYPE_BUFF_STR, turns, aoe, v1_b, v2_b,
+        v_b = Effect.createEffect(st, eff_type, turns, aoe, v1_b, v2_b,
                                     bool(crit), py_target, py_caster,
                                     atk_obj_py, jet, stackable, 0,
                                     target_count, 0, modifiers)
 
-        # ---- C side ----
         s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
         v_a_c = s._effect_create({
-            "type": TYPE_BUFF_STR, "caster_idx": 0, "target_idx": 1,
+            "type": eff_type, "caster_idx": 0, "target_idx": 1,
             "value1": v1_a, "value2": v2_a, "jet": jet,
             "turns": turns, "aoe": aoe, "critical": crit,
             "attack_id": attack_id, "modifiers": modifiers,
             "target_count": target_count,
         })
         v_b_c = s._effect_create({
-            "type": TYPE_BUFF_STR, "caster_idx": 0, "target_idx": 1,
+            "type": eff_type, "caster_idx": 0, "target_idx": 1,
             "value1": v1_b, "value2": v2_b, "jet": jet,
             "turns": turns, "aoe": aoe, "critical": crit,
             "attack_id": attack_id, "modifiers": modifiers,
@@ -1548,7 +1550,7 @@ def fuzz_create_effect_stacking(n_cases, rng):
         if v_a_c != v_a or v_b_c != v_b or errs or n_eff_c != n_eff_py:
             fails += 1
             if fails <= 3:
-                print(f"  stack trial {trial} (stk={stackable} atk={attack_id}):")
+                print(f"  stack trial {trial} type={eff_type} stk={stackable} atk={attack_id}:")
                 if v_a_c != v_a: print(f"    v_a: C={v_a_c} PY={v_a}")
                 if v_b_c != v_b: print(f"    v_b: C={v_b_c} PY={v_b}")
                 if n_eff_c != n_eff_py:
