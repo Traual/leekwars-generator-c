@@ -304,6 +304,16 @@ cdef extern from "lw_critical.h":
     double lw_roll_critical_power(LwState *state, int caster_idx)
 
 
+cdef extern from "lw_movement.h":
+    int lw_compute_push_dest(const LwState *state,
+                              int entity_cell, int target_cell, int caster_cell)
+    int lw_compute_attract_dest(const LwState *state,
+                                 int entity_cell, int target_cell, int caster_cell)
+    int lw_apply_slide(LwState *state, int entity_idx, int dest_cell)
+    int lw_apply_teleport(LwState *state, int entity_idx, int dest_cell)
+    int lw_apply_permutation(LwState *state, int caster_idx, int target_idx)
+
+
 cdef extern from "lw_effect_dispatch.h":
     ctypedef struct LwEffectInput:
         int    type
@@ -834,6 +844,21 @@ cdef class State:
 
     def _roll_critical(self, int caster_idx):
         return lw_roll_critical(self._s, caster_idx)
+
+    def _compute_push_dest(self, int entity_cell, int target_cell, int caster_cell):
+        return lw_compute_push_dest(self._s, entity_cell, target_cell, caster_cell)
+
+    def _compute_attract_dest(self, int entity_cell, int target_cell, int caster_cell):
+        return lw_compute_attract_dest(self._s, entity_cell, target_cell, caster_cell)
+
+    def _apply_slide(self, int entity_idx, int dest_cell):
+        return lw_apply_slide(self._s, entity_idx, dest_cell)
+
+    def _apply_teleport_to(self, int entity_idx, int dest_cell):
+        return lw_apply_teleport(self._s, entity_idx, dest_cell)
+
+    def _apply_permutation(self, int caster_idx, int target_idx):
+        return lw_apply_permutation(self._s, caster_idx, target_idx)
 
     def _effect_create(self, dict params):
         """Run lw_effect_create — the C equivalent of Python's
