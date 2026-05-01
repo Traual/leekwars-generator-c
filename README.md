@@ -49,6 +49,8 @@ this C port is being built bottom-up alongside parity tests.
 | Resurrect / Summon (entity allocation)    | ❌ TODO |
 | Passive event hooks (POISON_TO_*, etc.)   | ❌ TODO |
 | Effect.createEffect stacking/replacement  | ✅ done — pre-apply removal of existing same-(id, attack_id) entry for non-stackable, post-apply merge with same-(id, attack_id, turns, caster) for stackable |
+| Passive event hooks (POISON_TO_*, DAMAGE_TO_*, MOVED_TO_MP, KILL_TO_TP, CRITICAL_TO_HEAL, ALLY_KILLED_TO_AGILITY, NOVA_DAMAGE_TO_MAGIC) | ✅ framework + 7 events wired (lw_event_on_*); fires through lw_effect_create with the right TYPE_RAW_BUFF_* target |
+| Movement parity test (Push / Attract)     | ✅ 4000/4000 cases vs upstream Python+Java |
 
 ## Microbench (Python -> C, 5x5 toy state)
 
