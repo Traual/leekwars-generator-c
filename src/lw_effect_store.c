@@ -117,8 +117,14 @@ int lw_effect_decrement_turns(LwEntity *target) {
 
 /* Internal: scale one effect's value/stats by ``factor``, propagating
  * the stat delta back into target.buff_stats[]. Mirrors Effect.reduce
- * in Python (per-stat sign preservation, java_round on absolute value,
- * delta applied to target). */
+ * in Python:
+ *   newValue = java_round(abs(stat_value) * reduction * sign)
+ *
+ * Crucially the sign is multiplied INSIDE java_round, not outside.
+ * For negative shackles ending on a .5 boundary that matters:
+ *   java_round(-37.5)            = floor(-37.5+0.5) = -37  (Python)
+ *   java_round(37.5) * -1        = floor(38)        = -38  (wrong)
+ * so we mirror Python's expression order. */
 static void scale_effect_inplace(LwEntity *target, LwEffect *e, double factor) {
     if (factor < 0.0) factor = 0.0;
     e->value = java_round((double)e->value * factor);
@@ -126,9 +132,10 @@ static void scale_effect_inplace(LwEntity *target, LwEffect *e, double factor) {
     for (int s = 0; s < LW_STAT_COUNT; s++) {
         int cur = e->stats[s];
         if (cur == 0) continue;
-        int sign = (cur > 0) ? 1 : -1;
+        int sign = (cur > 0) ? 1 : (cur < 0 ? -1 : 0);
         int abs_cur = (cur > 0) ? cur : -cur;
-        int new_val = java_round((double)abs_cur * factor) * sign;
+        /* Match Python: java_round(abs * factor * sign), sign INSIDE. */
+        int new_val = java_round((double)abs_cur * factor * (double)sign);
         int delta = new_val - cur;
         if (delta != 0) {
             e->stats[s] += delta;

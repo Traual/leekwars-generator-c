@@ -55,7 +55,24 @@ cdef extern from "lw_map.h":
 
 cdef extern from "lw_effect.h":
     ctypedef struct LwEffect:
-        pass
+        int id
+        int turns
+        double value1, value2
+        double aoe
+        int critical
+        double critical_power
+        double jet
+        double erosion_rate
+        int value
+        int previous_total
+        int target_count
+        int propagate
+        int modifiers
+        int log_id
+        int target_id
+        int caster_id
+        int attack_id
+        int stats[C_STAT_COUNT]
 
 
 cdef extern from "lw_entity.h":
@@ -72,6 +89,7 @@ cdef extern from "lw_entity.h":
         int chip_cooldown[C_MAX_INVENTORY]
         int base_stats[C_STAT_COUNT]
         int buff_stats[C_STAT_COUNT]
+        LwEffect effects[16]
         int n_effects
         unsigned int state_flags
         unsigned char alive
@@ -848,6 +866,62 @@ cdef class State:
 
     def _set_buff_stat(self, int idx, int stat_index, int value):
         self._s.entities[idx].buff_stats[stat_index] = value
+
+    def _add_effect(self, int target_idx, int effect_id, int turns,
+                     int value, int modifiers, dict stats_delta=None):
+        """Push an LwEffect entry on entity.effects[] for parity tests.
+        ``stats_delta`` maps stat_index -> int delta and is recorded
+        on the effect's stats[] field. Returns the slot index, -1 if full."""
+        cdef int slot, key, n_eff, i, int_val
+        if target_idx < 0 or target_idx >= self._s.n_entities:
+            return -1
+        n_eff = self._s.entities[target_idx].n_effects
+        if n_eff >= 16:
+            return -1
+        slot = n_eff
+        # Zero all fields manually (Cython can't take & through Python
+        # property chain for memset).
+        self._s.entities[target_idx].effects[slot].id = effect_id
+        self._s.entities[target_idx].effects[slot].turns = turns
+        self._s.entities[target_idx].effects[slot].value1 = 0.0
+        self._s.entities[target_idx].effects[slot].value2 = 0.0
+        self._s.entities[target_idx].effects[slot].aoe = 1.0
+        self._s.entities[target_idx].effects[slot].critical = 0
+        self._s.entities[target_idx].effects[slot].critical_power = 1.0
+        self._s.entities[target_idx].effects[slot].jet = 0.0
+        self._s.entities[target_idx].effects[slot].erosion_rate = 0.0
+        self._s.entities[target_idx].effects[slot].value = value
+        self._s.entities[target_idx].effects[slot].previous_total = 0
+        self._s.entities[target_idx].effects[slot].target_count = 0
+        self._s.entities[target_idx].effects[slot].propagate = 0
+        self._s.entities[target_idx].effects[slot].modifiers = modifiers
+        self._s.entities[target_idx].effects[slot].log_id = 0
+        self._s.entities[target_idx].effects[slot].target_id = target_idx
+        self._s.entities[target_idx].effects[slot].caster_id = -1
+        self._s.entities[target_idx].effects[slot].attack_id = -1
+        for i in range(18):
+            self._s.entities[target_idx].effects[slot].stats[i] = 0
+        if stats_delta is not None:
+            for key, val in stats_delta.items():
+                if 0 <= key < 18:
+                    int_val = <int>val
+                    self._s.entities[target_idx].effects[slot].stats[<int>key] = int_val
+        self._s.entities[target_idx].n_effects = n_eff + 1
+        return slot
+
+    def _effect_stat_at(self, int target_idx, int slot, int stat_index):
+        if target_idx < 0 or target_idx >= self._s.n_entities:
+            return 0
+        if slot < 0 or slot >= self._s.entities[target_idx].n_effects:
+            return 0
+        return self._s.entities[target_idx].effects[slot].stats[stat_index]
+
+    def _effect_value_at(self, int target_idx, int slot):
+        if target_idx < 0 or target_idx >= self._s.n_entities:
+            return 0
+        if slot < 0 or slot >= self._s.entities[target_idx].n_effects:
+            return 0
+        return self._s.entities[target_idx].effects[slot].value
 
     # -- RNG management ----------------------------------------------
 

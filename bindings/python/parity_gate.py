@@ -140,18 +140,55 @@ class MockEntity:
         id_, delta, caster = args
         self._buff[id_] += delta
 
-    def getEffects(self): return []
-    def addEffect(self, *a, **kw): pass
-    def removeEffect(self, *a, **kw): pass
+    # effects list -- we expose attribute access for Effect.reduce
+    # to walk and mutate. Default: empty.
+    @property
+    def effects(self):
+        if not hasattr(self, "_effects"): self._effects = []
+        return self._effects
+
+    def getEffects(self):
+        return self.effects
+
+    def addEffect(self, eff): self.effects.append(eff)
+    def removeEffect(self, eff):
+        if eff in self.effects: self.effects.remove(eff)
     def addLaunchedEffect(self, *a, **kw): pass
     def removeLaunchedEffect(self, *a, **kw): pass
+
     def reduceEffects(self, percent, caster):
-        # Effect-level reduce — we don't model in this gate (no effect
-        # entries on mock); leave as no-op.
-        pass
-    def reduceEffectsTotal(self, percent, caster): pass
-    def clearPoisons(self, caster): pass
-    def removeShackles(self): pass
+        # Mirrors Entity.reduceEffects: skip irreductible (modifier
+        # bit 16 = MODIFIER_IRREDUCTIBLE).
+        for effect in list(self.effects):
+            if (effect.getModifiers() & 16) == 0:
+                effect.reduce(percent, caster)
+
+    def reduceEffectsTotal(self, percent, caster):
+        # Same but ignores irreductible.
+        for effect in list(self.effects):
+            effect.reduce(percent, caster)
+
+    def clearPoisons(self, caster):
+        # Drop POISON effects (TYPE_POISON = 13). Real Entity also
+        # unwinds buff_stats via removeEffect; poisons don't carry
+        # stats[] so this is a list-only mutation.
+        self._effects = [e for e in self.effects if e.getId() != 13]
+
+    def removeShackles(self):
+        # SHACKLE_* TYPE_* values: MP=17, TP=18, STRENGTH=19, MAGIC=24,
+        # AGILITY=47, WISDOM=48. Removing them must unwind their stats[]
+        # deltas (Entity.removeEffect path).
+        SHACKLE_IDS = {17, 18, 19, 24, 47, 48}
+        new_list = []
+        for e in self.effects:
+            if e.getId() in SHACKLE_IDS:
+                # Unwind stats[].
+                if hasattr(e, "stats") and e.stats is not None:
+                    for stat_key, stat_value in list(e.stats.stats.items()):
+                        self._buff[stat_key] -= stat_value
+            else:
+                new_list.append(e)
+        self._effects = new_list
 
     # --- Passive event hooks (no-ops in the gate) -------------------
     def onDirectDamage(self, *a, **kw): pass
@@ -1270,6 +1307,183 @@ def fuzz_debuff_empty(n_cases, rng):
     return fails
 
 
+# ----- Effect-list operations with populated lists ------------
+
+# Effect type constants (Python's TYPE_*).
+TYPE_BUFF_STRENGTH = 3
+TYPE_BUFF_AGILITY  = 4
+TYPE_BUFF_MP       = 7
+TYPE_POISON        = 13
+TYPE_SHACKLE_MP    = 17
+TYPE_SHACKLE_STRENGTH = 19
+
+
+def _seed_matching_effects(s, py_target, rng, n_effects):
+    """Push the same effects on the C target.effects[] AND on
+    py_target.effects, each with random values + stats. Returns the
+    list of (id, value, stats_dict, modifiers) tuples for assertions."""
+    from leekwars.effect.effect_buff_strength import EffectBuffStrength
+    from leekwars.effect.effect_shackle_strength import EffectShackleStrength
+    from leekwars.effect.effect_poison import EffectPoison
+
+    py_caster = MockEntity()  # dummy
+
+    # Choose mix: each entry is (effect_class, type_id, stat_idx_for_delta, sign)
+    choices = [
+        (EffectBuffStrength,    TYPE_BUFF_STRENGTH,    STRENGTH, +1),
+        (EffectShackleStrength, TYPE_SHACKLE_STRENGTH, STRENGTH, -1),
+        (EffectPoison,          TYPE_POISON,           None,     0),
+    ]
+    seeded = []
+    for _ in range(n_effects):
+        cls, type_id, stat_idx, sign = rng.choice(choices)
+        value = rng.randint(10, 200)
+        modifiers = 0
+        if rng.random() < 0.20:
+            modifiers |= 16  # MODIFIER_IRREDUCTIBLE
+
+        # Python: instantiate the actual Effect class with prepared fields.
+        e = cls()
+        e.setId(type_id)   # Python Effect base defaults _id to 0 -- without
+                            # this call removeShackles / clearPoisons /
+                            # debuff would never recognize the entry.
+        e.value = value
+        e.value1 = 0; e.value2 = 0; e.jet = 0; e.aoe = 1.0
+        e.criticalPower = 1.0; e.turns = 3
+        e.modifiers = modifiers
+        e.target = py_target
+        e.caster = py_caster
+        e.attack = None
+        if stat_idx is not None:
+            e.stats.setStat(stat_idx, value * sign)
+            py_target._buff[stat_idx] += value * sign
+        py_target.effects.append(e)
+
+        # C side: push matching entry.
+        stats_delta = {}
+        if stat_idx is not None:
+            stats_delta[stat_idx] = value * sign
+            # Note: C doesn't auto-update buff_stats from add_effect;
+            # caller pre-applied the delta. Mirror by setting buff_stat:
+            cur = s.entity_buff_stat(1, stat_idx)
+            s._set_buff_stat(1, stat_idx, cur + value * sign)
+        s._add_effect(1, type_id, 3, value, modifiers, stats_delta)
+        seeded.append((type_id, value, stats_delta, modifiers))
+    return seeded
+
+
+def fuzz_antidote_populated(n_cases, rng):
+    from leekwars.effect.effect_antidote import EffectAntidote
+    fails = 0
+    for trial in range(n_cases):
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+
+        n_effects = rng.randint(0, 5)
+        _seed_matching_effects(s, py_target, rng, n_effects)
+
+        e = EffectAntidote()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s._apply_antidote(1)
+
+        errs = compare_states(s, py_caster, py_target, "antidote_pop", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  antidote_pop trial {trial} (n_eff={n_effects}): {errs[:3]}")
+    return fails
+
+
+def fuzz_remove_shackles_populated(n_cases, rng):
+    from leekwars.effect.effect_remove_shackles import EffectRemoveShackles
+    fails = 0
+    for trial in range(n_cases):
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+
+        n_effects = rng.randint(0, 5)
+        _seed_matching_effects(s, py_target, rng, n_effects)
+
+        e = EffectRemoveShackles()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s._apply_remove_shackles(1)
+
+        errs = compare_states(s, py_caster, py_target, "rs_pop", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  remove_shackles_pop trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_debuff_populated(n_cases, rng):
+    from leekwars.effect.effect_debuff import EffectDebuff
+    fails = 0
+    for trial in range(n_cases):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        target_count = rng.choice([1, 2, 3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+
+        n_effects = rng.randint(0, 4)
+        _seed_matching_effects(s, py_target, rng, n_effects)
+
+        e = EffectDebuff()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr,
+                            target_count=target_count)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s._apply_debuff(0, 1, v1, v2, jet, aoe, crit_pwr, target_count)
+
+        errs = compare_states(s, py_caster, py_target, "debuff_pop", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  debuff_pop trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_total_debuff_populated(n_cases, rng):
+    from leekwars.effect.effect_total_debuff import EffectTotalDebuff
+    fails = 0
+    for trial in range(n_cases):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        target_count = rng.choice([1, 2, 3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+
+        n_effects = rng.randint(0, 4)
+        _seed_matching_effects(s, py_target, rng, n_effects)
+
+        e = EffectTotalDebuff()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr,
+                            target_count=target_count)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s._apply_total_debuff(0, 1, v1, v2, jet, aoe, crit_pwr, target_count)
+
+        errs = compare_states(s, py_caster, py_target, "total_debuff_pop", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  total_debuff_pop trial {trial}: {errs[:3]}")
+    return fails
+
+
 def fuzz_poison_tick(n_cases, rng):
     """applyStartTurn for EffectPoison: target takes self.value damage
     each turn, with INVINCIBLE -> 0 and erosion."""
@@ -1482,6 +1696,11 @@ def main():
         ("remove_shackles (empty)", fuzz_remove_shackles_empty),
         ("debuff (empty)",          fuzz_debuff_empty),
         ("total_debuff (empty)",    fuzz_total_debuff_empty),
+        # Same effects with populated effect-list (real branch coverage)
+        ("antidote (populated)",    fuzz_antidote_populated),
+        ("remove_shackles (pop)",   fuzz_remove_shackles_populated),
+        ("debuff (populated)",      fuzz_debuff_populated),
+        ("total_debuff (pop)",      fuzz_total_debuff_populated),
         # applyStartTurn ticks
         ("poison_tick",             fuzz_poison_tick),
         ("aftereffect_tick",        fuzz_aftereffect_tick),
