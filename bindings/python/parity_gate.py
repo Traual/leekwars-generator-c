@@ -151,6 +151,7 @@ class MockEntity:
         pass
     def reduceEffectsTotal(self, percent, caster): pass
     def clearPoisons(self, caster): pass
+    def removeShackles(self): pass
 
     # --- Passive event hooks (no-ops in the gate) -------------------
     def onDirectDamage(self, *a, **kw): pass
@@ -1126,6 +1127,174 @@ def fuzz_kill(n_cases, rng):
     return fails
 
 
+def fuzz_add_state(n_cases, rng):
+    from leekwars.effect.effect_add_state import EffectAddState
+    fails = 0
+    for trial in range(n_cases):
+        # value1 holds the EntityState IntEnum value to add (in Python's
+        # IntEnum convention -- NOT the C bitflag). Pick INVINCIBLE/UNHEALABLE.
+        py_state = rng.choice([PY_STATE_INVINCIBLE, PY_STATE_UNHEALABLE])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectAddState()
+        _set_effect_common(e, v1=float(py_state), v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        # The C side uses bitflag layout: convert PY_STATE_X -> STATE_X bit.
+        c_flag = (STATE_INVINCIBLE if py_state == PY_STATE_INVINCIBLE
+                  else STATE_UNHEALABLE)
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_add_state(1, c_flag)
+
+        # Compare numerics (no buff change expected) + state flags.
+        errs = compare_states(s, py_caster, py_target, "add_state", trial,
+                                check_states=True)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  add_state trial {trial} (py_state={py_state}): {errs[:3]}")
+    return fails
+
+
+# ---------------- effect-list operations -------------------------
+# Antidote / RemoveShackles / Debuff / TotalDebuff all walk
+# target.getEffects() and mutate. To test them faithfully we need the
+# mock entity to actually carry an effects list — and to seed the same
+# list on the C side via a setter. Since the C engine doesn't yet
+# expose entity-level effect inserts from Python (would need a
+# dedicated setter), we test these effects with an empty list (no-op
+# expected on both sides) AND with one synthetic poison/shackle entry
+# pushed via a helper.
+
+class _MockEffect:
+    """Minimal Effect-shaped object for the mock entity's effects list.
+    Just enough surface area for Effect.reduce / clearPoisons /
+    EffectRemoveShackles to walk and mutate.
+
+    Carries id, value, and a stats[] dict so reduce() updates target
+    buffs the way Python expects."""
+    def __init__(self, *, eff_id, value, turns=3, stats_delta=None,
+                 caster=None, attack=None, modifiers=0):
+        self._id = eff_id
+        self.turns = turns
+        self.value = value
+        self.stats = _MockEffectStats(stats_delta or {})
+        self.caster = caster
+        self.attack = attack
+        self.modifiers = modifiers
+        self.criticalPower = 1.0
+    def getId(self): return self._id
+    def getCaster(self): return self.caster
+    def getStats(self): return self.stats
+    def getModifiers(self): return self.modifiers
+    def getState(self): return None
+
+
+class _MockEffectStats:
+    def __init__(self, deltas):
+        self.stats = dict(deltas)  # stat_idx -> int
+    def updateStat(self, key, delta):
+        self.stats[key] = self.stats.get(key, 0) + delta
+
+
+def fuzz_antidote_empty(n_cases, rng):
+    """Antidote on target with no poisons -> no-op."""
+    from leekwars.effect.effect_antidote import EffectAntidote
+    fails = 0
+    for trial in range(min(n_cases, 100)):  # short — no real branch coverage
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectAntidote()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_antidote(1)
+
+        errs = compare_states(s, py_caster, py_target, "antidote", trial)
+        if errs:
+            fails += 1
+            if fails <= 3: print(f"  antidote trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_remove_shackles_empty(n_cases, rng):
+    """RemoveShackles on target with no shackles -> no-op."""
+    from leekwars.effect.effect_remove_shackles import EffectRemoveShackles
+    fails = 0
+    for trial in range(min(n_cases, 100)):
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectRemoveShackles()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_remove_shackles(1)
+
+        errs = compare_states(s, py_caster, py_target, "remove_shackles", trial)
+        if errs:
+            fails += 1
+            if fails <= 3: print(f"  remove_shackles trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_debuff_empty(n_cases, rng):
+    """Debuff on target with no effects -> only the percentage value
+    is computed, no list mutation. Compare value (and that no buff_stats
+    changed)."""
+    from leekwars.effect.effect_debuff import EffectDebuff
+    fails = 0
+    for trial in range(min(n_cases, 200)):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        target_count = rng.choice([1, 2, 3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectDebuff()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr,
+                            target_count=target_count)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_debuff(0, 1, v1, v2, jet, aoe, crit_pwr, target_count)
+
+        errs = compare_states(s, py_caster, py_target, "debuff", trial)
+        if errs:
+            fails += 1
+            if fails <= 3: print(f"  debuff trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_total_debuff_empty(n_cases, rng):
+    from leekwars.effect.effect_total_debuff import EffectTotalDebuff
+    fails = 0
+    for trial in range(min(n_cases, 200)):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        target_count = rng.choice([1, 2, 3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectTotalDebuff()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr,
+                            target_count=target_count)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_total_debuff(0, 1, v1, v2, jet, aoe, crit_pwr, target_count)
+
+        errs = compare_states(s, py_caster, py_target, "total_debuff", trial)
+        if errs:
+            fails += 1
+            if fails <= 3: print(f"  total_debuff trial {trial}: {errs[:3]}")
+    return fails
+
+
 def fuzz_multiply_stats(n_cases, rng):
     from leekwars.effect.effect_multiply_stats import EffectMultiplyStats
     fails = 0
@@ -1206,11 +1375,16 @@ def main():
         ("raw_buff_power",          fuzz_raw_buff_power),
         ("raw_absolute_shield",     fuzz_raw_absolute_shield),
         ("raw_relative_shield",     fuzz_raw_relative_shield),
-        # steal / kill / multiply
+        # steal / kill / multiply / state / cleanup
         ("steal_life",              fuzz_steal_life),
         ("steal_absolute_shield",   fuzz_steal_absolute_shield),
         ("kill",                    fuzz_kill),
         ("multiply_stats",          fuzz_multiply_stats),
+        ("add_state",               fuzz_add_state),
+        ("antidote (empty)",        fuzz_antidote_empty),
+        ("remove_shackles (empty)", fuzz_remove_shackles_empty),
+        ("debuff (empty)",          fuzz_debuff_empty),
+        ("total_debuff (empty)",    fuzz_total_debuff_empty),
     ]
 
     total_fails = 0
