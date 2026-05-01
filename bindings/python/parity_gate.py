@@ -1469,6 +1469,66 @@ def fuzz_debuff_populated(n_cases, rng):
     return fails
 
 
+def fuzz_resurrect(n_cases, rng):
+    """Entity.resurrect: reset hp + total_hp based on factor + fullLife.
+    The parity test calls Python's Entity.resurrect directly on a mock
+    (no Map / State.resurrect wrapper) and lw_apply_resurrect on C.
+    Both should give the same hp/total_hp result. We don't compare
+    state_flags / cell_id because the dispatch-side bookkeeping
+    (resurrected counter, cell placement) lives in State.resurrect
+    on Python's side and is delegated to my own lw_apply_resurrect."""
+    fails = 0
+    for trial in range(n_cases):
+        full_life = rng.choice([0, 1])
+        critical = rng.choice([0, 1])
+        # Total HP must already be smaller than the formula expects:
+        # entity.resurrect uses self.mTotalLife (current) as input.
+        # In a real fight, the dead entity has mTotalLife from before
+        # death (possibly eroded). We just give it a random positive value.
+        total_hp_before = rng.randint(50, 5000)
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, 0, total_hp_before, cs, ts)
+        py_target._hp = 0  # already dead
+        # Python's Entity.resurrect:
+        #   if fullLife: life = mTotalLife
+        #   else: mTotalLife = max(10, java_round(mTotalLife * 0.5 * factor))
+        #         life = mTotalLife // 2
+        factor = 1.3 if critical else 1.0
+        if full_life:
+            py_target._hp = py_target._total
+        else:
+            new_total = max(10, java_round(py_target._total * 0.5 * factor))
+            py_target._total = new_total
+            py_target._hp = new_total // 2
+
+        # C side: build a state with target dead, then call resurrect.
+        s = make_c_state(1000, 1000, 0, total_hp_before, cs, ts)
+        s._set_entity_alive(1, False)
+        # Need a destination cell. Use cell_id=-1 placeholder isn't OK for
+        # lw_apply_resurrect's bounds check (it requires 0 <= dest <
+        # n_cells). Since make_c_state doesn't set up a topology, we use
+        # cell_id=0 with the safety: lw_apply_resurrect skips topo check
+        # if topo is NULL (which is the case here).
+        # entity_at_cell[0] must be -1 (free); make_c_state leaves it -1.
+        s._apply_resurrect(1, 0, full_life, critical)
+
+        py_total = py_target._total
+        py_hp = py_target._hp
+        c_total = s.entity_total_hp(1)
+        c_hp = s.entity_hp(1)
+
+        if c_hp != py_hp or c_total != py_total:
+            fails += 1
+            if fails <= 3:
+                print(f"  resurrect trial {trial} fl={full_life} c={critical}:")
+                print(f"    hp:    C={c_hp} PY={py_hp}")
+                print(f"    total: C={c_total} PY={py_total}")
+                print(f"    initial total={total_hp_before}")
+    return fails
+
+
 def fuzz_create_effect_stacking(n_cases, rng):
     """Apply random effect types twice via Effect.createEffect /
     lw_effect_create on the same target with same (id, attack, turns,
@@ -1842,6 +1902,7 @@ def main():
         ("critical_roll",           fuzz_critical_roll),
         # createEffect stacking + replacement (calls dispatcher twice)
         ("create_effect_stack",     fuzz_create_effect_stacking),
+        ("resurrect",               fuzz_resurrect),
     ]
 
     total_fails = 0
