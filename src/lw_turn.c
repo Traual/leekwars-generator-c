@@ -103,6 +103,40 @@ int lw_next_entity_turn(LwState *state) {
 }
 
 
+/* Decrement the turns counter on every effect that THIS entity cast
+ * on any target. Mirrors Python's Entity.startTurn loop:
+ *
+ *   for effect in self.launchedEffects:
+ *       if effect.getTurns() != -1:
+ *           effect.setTurns(effect.getTurns() - 1)
+ *       if effect.getTurns() == 0:
+ *           effect.getTarget().removeEffect(effect)
+ *           self.launchedEffects.pop(e); e -= 1
+ *
+ * We don't maintain a separate launchedEffects list, so we walk every
+ * entity's effects[] looking for caster_id == ``caster_idx``.
+ *
+ * Returns the number of effects that expired (got removed). */
+static int decrement_launched_effects(LwState *state, int caster_idx) {
+    int removed = 0;
+    for (int t = 0; t < state->n_entities; t++) {
+        LwEntity *target = &state->entities[t];
+        /* Walk back-to-front so removal indices stay valid. */
+        for (int i = target->n_effects - 1; i >= 0; i--) {
+            LwEffect *e = &target->effects[i];
+            if (e->caster_id != caster_idx) continue;
+            if (e->turns <= 0) continue;
+            e->turns--;
+            if (e->turns == 0) {
+                lw_effect_remove(target, i);
+                removed++;
+            }
+        }
+    }
+    return removed;
+}
+
+
 int lw_entity_start_turn(LwState *state, int entity_idx) {
     if (state == NULL) return 0;
     if (entity_idx < 0 || entity_idx >= state->n_entities) return 0;
@@ -114,10 +148,26 @@ int lw_entity_start_turn(LwState *state, int entity_idx) {
     e->used_tp = 0;
     e->used_mp = 0;
 
-    return lw_turn_start(state, entity_idx);
+    /* Tick effects ON this entity (poison/aftereffect/heal). */
+    int net_damage = lw_turn_start(state, entity_idx);
+
+    /* Decrement effects launched BY this entity on any target.
+     * Matches Python's startTurn order: tick first, decrement second. */
+    decrement_launched_effects(state, entity_idx);
+
+    return net_damage;
 }
 
 
 int lw_entity_end_turn(LwState *state, int entity_idx) {
-    return lw_turn_end(state, entity_idx);
+    /* Python's endTurn does NOT decrement turns. The decrement lives in
+     * the next entity's startTurn (their launchedEffects walk).
+     *
+     * We keep this entry point because callers wired it in expecting
+     * a counterpart to entity_start_turn, but it's a no-op now. The
+     * legacy lw_turn_end is still exposed for tests that explicitly
+     * want to decrement an entity's own effects[] (test_turn.c uses
+     * it for unit-level coverage of decrement_turns). */
+    (void)state; (void)entity_idx;
+    return 0;
 }
