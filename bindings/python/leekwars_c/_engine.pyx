@@ -304,6 +304,24 @@ cdef extern from "lw_critical.h":
     double lw_roll_critical_power(LwState *state, int caster_idx)
 
 
+cdef extern from "lw_effect_dispatch.h":
+    ctypedef struct LwEffectInput:
+        int    type
+        int    caster_idx
+        int    target_idx
+        double value1, value2
+        double jet
+        int    turns
+        double aoe
+        int    critical
+        int    attack_id
+        int    modifiers
+        int    previous_value
+        int    target_count
+
+    int lw_effect_create(LwState *state, const LwEffectInput *p)
+
+
 # --- Python-side constants -------------------------------------------
 
 LW_MAX_INVENTORY = 6
@@ -816,6 +834,38 @@ cdef class State:
 
     def _roll_critical(self, int caster_idx):
         return lw_roll_critical(self._s, caster_idx)
+
+    def _effect_create(self, dict params):
+        """Run lw_effect_create — the C equivalent of Python's
+        Effect.createEffect. Used by parity tests for stacking +
+        replacement coverage."""
+        cdef LwEffectInput p
+        p.type = <int>params.get("type", 0)
+        p.caster_idx = <int>params.get("caster_idx", 0)
+        p.target_idx = <int>params.get("target_idx", 0)
+        p.value1 = <double>params.get("value1", 0.0)
+        p.value2 = <double>params.get("value2", 0.0)
+        p.jet = <double>params.get("jet", 0.0)
+        p.turns = <int>params.get("turns", 0)
+        p.aoe = <double>params.get("aoe", 1.0)
+        p.critical = <int>params.get("critical", 0)
+        p.attack_id = <int>params.get("attack_id", -1)
+        p.modifiers = <int>params.get("modifiers", 0)
+        p.previous_value = <int>params.get("previous_value", 0)
+        p.target_count = <int>params.get("target_count", 1)
+        return lw_effect_create(self._s, &p)
+
+    def entity_n_effects_at(self, int idx):
+        if idx < 0 or idx >= self._s.n_entities:
+            return 0
+        return self._s.entities[idx].n_effects
+
+    def effect_id_at(self, int idx, int slot):
+        if idx < 0 or idx >= self._s.n_entities:
+            return 0
+        if slot < 0 or slot >= self._s.entities[idx].n_effects:
+            return 0
+        return self._s.entities[idx].effects[slot].id
 
     def extract_mlp_features(self, int my_team, out):
         """Fill ``out`` (a 256-element float32 buffer, typically a numpy

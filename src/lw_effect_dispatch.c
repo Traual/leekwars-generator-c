@@ -27,15 +27,88 @@
 #include <math.h>
 
 
+/* Pre-apply replacement: if the effect is non-stackable (Python's
+ * "if not stackable" branch in createEffect), look for an existing
+ * effect on target with the same (id, attack_id) and remove it.
+ * Mirrors the first block of Effect.createEffect.
+ *
+ * NOTE Python compares by ``e.attack.getItemId()`` so attack_id == -1
+ * (no attack) is treated as a separate group from any positive id.
+ */
+static void replace_existing_non_stackable(LwState *state,
+                                            const LwEffectInput *p,
+                                            int effect_type) {
+    if (p->turns == 0) return;
+    if ((p->modifiers & LW_MODIFIER_STACKABLE) != 0) return;
+    if (p->target_idx < 0 || p->target_idx >= state->n_entities) return;
+
+    LwEntity *target = &state->entities[p->target_idx];
+    for (int i = 0; i < target->n_effects; i++) {
+        LwEffect *e = &target->effects[i];
+        if (e->id == effect_type && e->attack_id == p->attack_id) {
+            lw_effect_remove(target, i);
+            return;
+        }
+    }
+}
+
+
+/* Post-apply stacking: if there's an existing same-(id, turns,
+ * attack_id, caster) effect, merge `value` into it via
+ * Effect.mergeWith semantics:
+ *   e.value += value;
+ *   for each non-zero stat slot in e.stats[]: e.stats[k] += value*sign
+ * Returns 1 if merged (caller skips the new-entry add), 0 otherwise. */
+static int try_stack(LwState *state, const LwEffectInput *p,
+                     int effect_type, int value,
+                     int stat_index, int stat_sign) {
+    if (value <= 0 || p->turns == 0) return 0;
+    if (p->target_idx < 0 || p->target_idx >= state->n_entities) return 0;
+
+    LwEntity *target = &state->entities[p->target_idx];
+    for (int i = 0; i < target->n_effects; i++) {
+        LwEffect *e = &target->effects[i];
+        if (e->id        != effect_type)      continue;
+        if (e->attack_id != p->attack_id)     continue;
+        if (e->turns     != p->turns)         continue;
+        if (e->caster_id != p->caster_idx)    continue;
+
+        e->value += value;
+        /* mergeWith only updates the stats[] slots that already had a
+         * non-zero entry. We honor stat_index/stat_sign for
+         * single-slot effects (every buff/shackle/shield in our
+         * catalog), which matches Python's loop-over-non-zero-stats
+         * behavior because exactly one slot is non-zero per port. */
+        if (stat_index >= 0 && stat_index < LW_STAT_COUNT
+            && e->stats[stat_index] != 0) {
+            e->stats[stat_index] += value * stat_sign;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+
 /* Build an effect entry from the input + computed value, then add it
  * to target's effect list. ``stat_index`` is the stat slot whose
  * buff_stats[] was modified (or -1 if none). ``stat_sign`` is +1 / -1
- * to record the sign of the delta. */
+ * to record the sign of the delta.
+ *
+ * Now also implements Python's stacking rule: before adding, check
+ * for an existing same-attack-same-id-same-turns-same-caster effect
+ * and merge into it instead.
+ */
 static void register_entry(LwState *state, const LwEffectInput *p,
                            int value, int effect_type,
                            int stat_index, int stat_sign) {
     if (p->turns <= 0 || value <= 0) return;
     if (p->target_idx < 0 || p->target_idx >= state->n_entities) return;
+
+    /* Try stacking first (matches Python's order: stacking check runs
+     * before the new-entry add). */
+    if (try_stack(state, p, effect_type, value, stat_index, stat_sign)) {
+        return;
+    }
 
     double crit_power = p->critical ? LW_CRITICAL_FACTOR : 1.0;
     LwEffect e;
@@ -65,6 +138,12 @@ int lw_effect_create(LwState *state, const LwEffectInput *p) {
     double crit_power = p->critical ? LW_CRITICAL_FACTOR : 1.0;
     int    tc         = p->target_count > 0 ? p->target_count : 1;
     int    value      = 0;
+
+    /* Python's first block in createEffect: if turns != 0 and not
+     * stackable, remove the existing same-(id, attack_id) effect
+     * before computing the new one. This rebuilds buff_stats[] (via
+     * effect_remove), so apply() reads the freshly-cleared buffs. */
+    replace_existing_non_stackable(state, p, p->type);
 
     switch (p->type) {
 
