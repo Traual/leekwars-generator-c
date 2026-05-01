@@ -190,6 +190,12 @@ cdef extern from "lw_attack_apply.h":
         int    targets_filter
         int    modifiers
 
+    ctypedef struct LwPassiveEffectSpec:
+        int    type
+        double value1, value2
+        int    turns
+        int    modifiers
+
     ctypedef struct LwAttackSpec:
         int  attack_type
         int  item_id
@@ -200,6 +206,8 @@ cdef extern from "lw_attack_apply.h":
         int  tp_cost
         int  n_effects
         LwAttackEffectSpec effects[8]
+        int  n_passives
+        LwPassiveEffectSpec passives[4]
 
     int lw_apply_attack_full(LwState *state,
                              int caster_idx,
@@ -519,6 +527,28 @@ cdef class AttackSpec:
         self._s.effects[i].targets_filter = targets_filter
         self._s.effects[i].modifiers = modifiers
         self._s.n_effects += 1
+        return self
+
+    def add_passive(self, int type, double value1=0.0, double value2=0.0,
+                    int turns=0, int modifiers=0):
+        """Append one weapon-passive slot. Up to 4 per attack. Type
+        is one of the passive marker effect ids:
+          POISON_TO_SCIENCE / DAMAGE_TO_ABSOLUTE_SHIELD /
+          DAMAGE_TO_STRENGTH / NOVA_DAMAGE_TO_MAGIC / MOVED_TO_MP /
+          ALLY_KILLED_TO_AGILITY / KILL_TO_TP / CRITICAL_TO_HEAL.
+
+        At runtime, the matching lw_event_on_X event walks the
+        wielding entity's weapons + passives and fires the right
+        TYPE_RAW_BUFF_* via Effect.createEffect."""
+        if self._s.n_passives >= 4:
+            raise OverflowError("attack passive slots full (max 4)")
+        cdef int i = self._s.n_passives
+        self._s.passives[i].type = type
+        self._s.passives[i].value1 = value1
+        self._s.passives[i].value2 = value2
+        self._s.passives[i].turns = turns
+        self._s.passives[i].modifiers = modifiers
+        self._s.n_passives += 1
         return self
 
     @property
