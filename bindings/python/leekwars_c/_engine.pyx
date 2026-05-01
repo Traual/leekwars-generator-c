@@ -660,6 +660,20 @@ cdef class State:
     def apply_action(self, int entity_index, Action action):
         return lw_apply_action(self._s, entity_index, &action._a) != 0
 
+    def apply_action_use_weapon(self, int entity_index, int weapon_id,
+                                  int target_cell_id):
+        """Convenience: build a USE_WEAPON action and apply it. Used by
+        bench_fight.py to drive the fight loop without per-call Action()
+        Python-object construction overhead (the per-call Action()
+        constructor was ~2 us/call, dominating the fight time)."""
+        cdef LwAction a
+        a.type = LW_ACTION_USE_WEAPON
+        a.weapon_id = weapon_id
+        a.chip_id = -1
+        a.target_cell_id = target_cell_id
+        a.path_len = 0
+        return lw_apply_action(self._s, entity_index, &a) != 0
+
     def apply_attack(self, int caster_idx, int target_cell_id,
                      AttackSpec spec):
         """Run the byte-for-byte attack pipeline directly with a spec
