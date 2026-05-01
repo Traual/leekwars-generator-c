@@ -44,10 +44,11 @@ this C port is being built bottom-up alongside parity tests.
 | Winner detection (alive teams + HP)       | ✅ 9/9 cases |
 | `extract_mlp_features` (zero-copy)        | ✅ done |
 | Python (Cython) bindings                  | ✅ done (legacy primitives; new ones unwired) |
-| Java parity gate on full fights           | ❌ TODO |
+| **Strong parity gate vs upstream Python** | ✅ 108000/108000 cases over 54 effect categories — see `bindings/python/parity_gate.py`. Caught 3 real divergences (life_steal+return_damage on Damage, targetCount-vs-aoe on RawBuffMP/TP, sign-inside-java_round on Effect.reduce) that my piecemeal port missed. |
 | Action-stream JSON output                 | ❌ TODO |
 | Resurrect / Summon (entity allocation)    | ❌ TODO |
 | Passive event hooks (POISON_TO_*, etc.)   | ❌ TODO |
+| Effect.createEffect stacking/replacement  | ❌ TODO (dispatcher just appends; no merge for stackable, no replace for non-stackable) |
 
 ## Microbench (Python -> C, 5x5 toy state)
 
@@ -117,28 +118,38 @@ bindings/
   python/       Cython wrapper exposing State / Action / etc.
 ```
 
-## Important caveat
+## Parity status
 
-The C engine has now reached byte-for-byte parity with the Python
-reference for the **combat core** (damage, heal, shields, buffs,
-debuffs, shackles, vulnerabilities, poison, aftereffect, life
-damage, nova damage, vitality, kill, multiply stats, antidote,
-remove shackles, vulnerability, ~35 effect types in total) plus the
-core drivers (start order, turn rotation, winner detection, attack
-pipeline, AoE shapes, critical roll, erosion).
+The C engine matches the upstream Python `leekwars` engine
+byte-for-byte across **54 effect categories × 2000 random parameter
+sets = 108000 fuzz cases**, comparing every numeric mutation it
+makes (target hp, total_hp, buff_stats[18], state_flags + same
+fields on caster). See `bindings/python/parity_gate.py`.
 
-What's still missing for full Java-parity self-play:
+Real bugs the gate caught and we fixed:
 
-  - **Action-stream JSON output** so the Python parity gate can
-    diff C vs. Python event-by-event
-  - **Resurrect / Summon** (need an entity-allocation path)
+1. `EffectDamage.apply` was missing two whole branches —
+   `lifeSteal` (caster heals from `value * caster.wisdom / 1000`)
+   and `returnDamage` (target's `damage_return` reflects damage to
+   caster). Now ported in `lw_apply_damage_v2`.
+2. `EffectRawBuffMP` and `EffectRawBuffTP` use `targetCount` as the
+   multiplier, not `aoe` like the other 9 raw buffs. Dispatcher
+   was passing the wrong arg.
+3. `Effect.reduce` rounds the **signed** value (`abs * factor *
+   sign` inside `java_round`), not `abs * factor` then `* sign`.
+   Off-by-one on .5 boundaries for negative shackles.
+
+What's still missing for full Java parity:
+
+  - **Action-stream JSON output** so we can diff C vs. Python
+    event-by-event over a full scripted fight
+  - **Resurrect / Summon** (entity-allocation path)
   - **Passive event hooks** for POISON_TO_*, DAMAGE_TO_*,
     KILL_TO_TP, ALLY_KILLED_TO_AGILITY, etc.
+  - **Effect.createEffect stacking / replacement** semantics
 
-The end-to-end self-play loop (`tests/test_full_fight.c`) already
-runs a 1v1 to a clean winner using only C primitives, including
-the byte-for-byte attack pipeline. The remaining items are about
-verification and edge-case coverage, not core combat correctness.
+The end-to-end self-play loop (`tests/test_full_fight.c`) runs a
+1v1 to a clean winner using only C primitives.
 
 ## License
 
