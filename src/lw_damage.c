@@ -131,6 +131,13 @@ int lw_apply_damage_v2(LwState *state,
     int target_was_alive = target->alive;
     lw_remove_life(state, target, dealt, erosion);
 
+    /* Action stream: log the damage event. Matches Python's
+     * state.log(ActionDamage(...)) emitted right before removeLife. */
+    if (dealt > 0 || erosion > 0) {
+        lw_action_emit(state, LW_ACT_DAMAGE, caster_idx, target_idx,
+                        dealt, erosion, 0);
+    }
+
     /* Passive event hooks (mirror Python's order: removeLife ->
      * onDirectDamage -> onNovaDamage). */
     if (dealt > 0)   lw_event_on_direct_damage(state, target_idx, dealt);
@@ -139,6 +146,7 @@ int lw_apply_damage_v2(LwState *state,
     /* If the target died on this hit, fire on_kill (caster) +
      * on_ally_killed (allies of the dead, excluding self). */
     if (target_was_alive && !target->alive) {
+        lw_action_emit(state, LW_ACT_KILL, caster_idx, target_idx, 0, 0, 0);
         lw_event_on_kill(state, caster_idx);
         lw_event_on_ally_killed(state, target_idx);
     }
@@ -227,6 +235,10 @@ int lw_apply_heal(LwState *state,
     if (amount > missing) amount = missing;
 
     target->hp += amount;
+    if (amount > 0) {
+        lw_action_emit(state, LW_ACT_HEAL, caster_idx, target_idx,
+                        amount, 0, 0);
+    }
     return amount;
 }
 

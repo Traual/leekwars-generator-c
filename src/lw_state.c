@@ -37,6 +37,8 @@ static int pool_push(LwState *s) {
 /* ------------ alloc -------------------------------------------------- */
 
 static void state_init_defaults(LwState *s) {
+    s->stream.enabled = 0;
+    s->stream.n = 0;
     s->n_entities = 0;
     s->n_in_order = 0;
     s->order_index = 0;

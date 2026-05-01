@@ -14,6 +14,7 @@
 #include "lw_types.h"
 #include "lw_entity.h"
 #include "lw_map.h"
+#include "lw_action_stream.h"
 
 /* Scenario type, matches engine.state.State.TYPE_* */
 #define LW_TYPE_SOLO    0
@@ -49,7 +50,31 @@ typedef struct {
     uint8_t  scenario_type;
     uint8_t  context;
     int      seed;
+
+    /* Optional action log -- populated when ``stream.enabled = 1``.
+     * Fixed-size so it travels with state.clone() at memcpy speed.
+     * AI-search inner loops should leave .enabled = 0 to skip emit
+     * overhead. */
+    LwActionStream stream;
 } LwState;
+
+
+/* Append one action log entry to state.stream IFF state.stream.enabled
+ * is set and there's room. Silent no-op otherwise. */
+static inline void lw_action_emit(LwState *state, int type,
+                                   int caster_id, int target_id,
+                                   int v1, int v2, int v3) {
+    if (state == NULL) return;
+    if (!state->stream.enabled) return;
+    if (state->stream.n >= LW_LOG_MAX_ENTRIES) return;
+    LwActionLog *e = &state->stream.entries[state->stream.n++];
+    e->type = type;
+    e->caster_id = caster_id;
+    e->target_id = target_id;
+    e->value1 = v1;
+    e->value2 = v2;
+    e->value3 = v3;
+}
 
 /* Allocation / clone -------------------------------------------------- */
 

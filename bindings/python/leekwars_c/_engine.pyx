@@ -95,6 +95,20 @@ cdef extern from "lw_entity.h":
         unsigned char alive
 
 
+cdef extern from "lw_action_stream.h":
+    ctypedef struct LwActionLog:
+        int type
+        int caster_id
+        int target_id
+        int value1
+        int value2
+        int value3
+    ctypedef struct LwActionStream:
+        int enabled
+        int n
+        LwActionLog entries[512]
+
+
 cdef extern from "lw_state.h":
     ctypedef struct LwState:
         LwMap map
@@ -109,6 +123,7 @@ cdef extern from "lw_state.h":
         unsigned char scenario_type
         unsigned char context
         int seed
+        LwActionStream stream
 
     LwState *lw_state_alloc()
     void     lw_state_free(LwState *s)
@@ -852,6 +867,49 @@ cdef class State:
         """Reseed the LCG to match Python's _DefaultRandom.seed(seed).
         Java parity: signed int64 cast preserves the bit pattern."""
         self._s.rng_n = <unsigned long long>(<long long>seed)
+
+    # -- Action stream accessors ------------------------------------
+
+    def stream_enable(self, bint on=True):
+        """Toggle action-stream emission. Off by default for AI search
+        hot loops."""
+        self._s.stream.enabled = 1 if on else 0
+
+    def stream_clear(self):
+        self._s.stream.n = 0
+
+    def stream_size(self):
+        return self._s.stream.n
+
+    def stream_entry(self, int i):
+        """Return the i-th log entry as a dict, or None if out of range."""
+        if i < 0 or i >= self._s.stream.n:
+            return None
+        cdef LwActionLog *e = &self._s.stream.entries[i]
+        return {
+            "type": e.type,
+            "caster": e.caster_id,
+            "target": e.target_id,
+            "v1": e.value1,
+            "v2": e.value2,
+            "v3": e.value3,
+        }
+
+    def stream_dump(self):
+        """Return the whole stream as a list of dicts. Convenience for
+        tests / replays."""
+        cdef int i, n = self._s.stream.n
+        out = []
+        for i in range(n):
+            out.append({
+                "type": self._s.stream.entries[i].type,
+                "caster": self._s.stream.entries[i].caster_id,
+                "target": self._s.stream.entries[i].target_id,
+                "v1": self._s.stream.entries[i].value1,
+                "v2": self._s.stream.entries[i].value2,
+                "v3": self._s.stream.entries[i].value3,
+            })
+        return out
 
     def _get_rng(self):
         return <long long>self._s.rng_n

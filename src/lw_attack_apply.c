@@ -94,9 +94,18 @@ int lw_apply_attack_full(LwState *state,
     /* 1. Roll critical (consumes 1 RNG draw). */
     int critical = lw_roll_critical(state, caster_idx);
 
+    /* Action stream: log the use-weapon / use-chip event. Python's
+     * Fight.useWeapon / useChip emit ActionUseWeapon / ActionUseChip
+     * right before applyOnCell. */
+    int log_type = (attack->attack_type == 1)
+                 ? LW_ACT_USE_WEAPON : LW_ACT_USE_CHIP;
+    lw_action_emit(state, log_type, caster_idx, target_cell_id,
+                    critical, attack->item_id, 0);
+
     /* Python's Fight.useWeapon / useChip fires caster.onCritical()
      * immediately after generateCritical, BEFORE applyOnCell. */
     if (critical) {
+        lw_action_emit(state, LW_ACT_CRITICAL, caster_idx, -1, 0, 0, 0);
         lw_event_on_critical(state, caster_idx);
     }
 

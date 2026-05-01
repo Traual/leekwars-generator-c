@@ -605,8 +605,9 @@ int lw_apply_kill(LwState *state, int caster_idx, int target_idx) {
         state->map.entity_at_cell[target->cell_id] = -1;
         target->cell_id = -1;
     }
-    /* Fire on_kill (caster) + on_ally_killed for the target's allies,
-     * matching Python's onPlayerDie hook. */
+    /* Action stream + passive event hooks (matches Python's
+     * onPlayerDie order: log -> on_kill -> on_ally_killed). */
+    lw_action_emit(state, LW_ACT_KILL, caster_idx, target_idx, 0, 0, 0);
     lw_event_on_kill(state, caster_idx);
     lw_event_on_ally_killed(state, target_idx);
     return lost;
