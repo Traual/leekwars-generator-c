@@ -121,10 +121,16 @@ bindings/
 ## Parity status
 
 The C engine matches the upstream Python `leekwars` engine
-byte-for-byte across **54 effect categories × 2000 random parameter
-sets = 108000 fuzz cases**, comparing every numeric mutation it
+byte-for-byte across **57 effect categories × 2000 random parameter
+sets = 114000 fuzz cases**, comparing every numeric mutation it
 makes (target hp, total_hp, buff_stats[18], state_flags + same
-fields on caster). See `bindings/python/parity_gate.py`.
+fields on caster). Includes per-effect formula tests, populated
+effect-list cleanup paths (Antidote, RemoveShackles, Debuff,
+TotalDebuff), `Effect.createEffect` stacking + replacement across
+13 buff/shackle/shield types, critical-hit roll vs Python's
+`_DefaultRandom`, and a multi-turn buff lifetime test that drives
+both engines through the per-entity startTurn / decrement cycle.
+See `bindings/python/parity_gate.py`.
 
 Real bugs the gate caught and we fixed:
 
@@ -138,15 +144,32 @@ Real bugs the gate caught and we fixed:
 3. `Effect.reduce` rounds the **signed** value (`abs * factor *
    sign` inside `java_round`), not `abs * factor` then `* sign`.
    Off-by-one on .5 boundaries for negative shackles.
+4. Turn decrement was happening on the **target**'s end-of-turn;
+   Python decrements on the **caster**'s start-of-turn (walking
+   `caster.launchedEffects`). 2-entity fight wall-clock timing
+   happened to converge by accident, but 3+-entity fights and any
+   "buff alive one extra turn" scenario diverged.
+
+Plus the dispatcher now implements the two missing branches of
+`Effect.createEffect`:
+
+  - Pre-apply removal of an existing same-(id, attack_id) entry
+    when the new effect is non-stackable
+  - Post-apply merge with an existing same-(id, attack_id, turns,
+    caster) entry when stackable
 
 What's still missing for full Java parity:
 
   - **Action-stream JSON output** so we can diff C vs. Python
     event-by-event over a full scripted fight
-  - **Resurrect / Summon** (entity-allocation path)
+  - **Multi-target attack pipeline** parity test (each effect is
+    individually parity-verified, but the full `Attack.applyOnCell`
+    flow with N targets isn't exercised against Python yet)
+  - **Movement effects** parity test (Push / Attract destinations
+    on a real grid; algorithms ported but not vs-Python tested)
+  - **Summon** (entity-allocation path)
   - **Passive event hooks** for POISON_TO_*, DAMAGE_TO_*,
     KILL_TO_TP, ALLY_KILLED_TO_AGILITY, etc.
-  - **Effect.createEffect stacking / replacement** semantics
 
 The end-to-end self-play loop (`tests/test_full_fight.c`) runs a
 1v1 to a clean winner using only C primitives.
