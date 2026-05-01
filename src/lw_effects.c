@@ -12,6 +12,7 @@
 
 #include "lw_effects.h"
 #include "lw_effect_store.h"
+#include "lw_attack_apply.h"  /* for lw_event_on_* hooks */
 #include <math.h>
 
 
@@ -81,6 +82,7 @@ int lw_apply_aftereffect(LwState *state,
     if (amount > target->hp) amount = target->hp;
 
     if (amount > 0) {
+        int target_was_alive = target->alive;
         target->hp -= amount;
         if (target->hp <= 0) {
             target->hp = 0;
@@ -90,7 +92,18 @@ int lw_apply_aftereffect(LwState *state,
                 target->cell_id = -1;
             }
         }
+        /* Python's EffectAftereffect.apply fires onNovaDamage(erosion);
+         * we don't apply erosion here (kept for v2 path), so just
+         * fire if Python-equivalent semantics need it. The
+         * lw_event_on_direct_damage corresponds to its own onDirectDamage
+         * but Aftereffect doesn't call onDirectDamage in Python --
+         * only onNovaDamage. We skip until erosion is plumbed here. */
+        if (target_was_alive && !target->alive) {
+            lw_event_on_kill(state, caster_idx);
+            lw_event_on_ally_killed(state, target_idx);
+        }
     }
+    (void)caster;
     return amount;
 }
 
@@ -580,7 +593,6 @@ int lw_apply_absolute_vulnerability(LwState *state,
 int lw_apply_kill(LwState *state, int caster_idx, int target_idx) {
     /* EffectKill: hp -> 0 directly. No shields, no INVINCIBLE check
      * (matches Python's commented-out branch). Returns life lost. */
-    (void)caster_idx;
     if (state == NULL) return 0;
     if (target_idx < 0 || target_idx >= state->n_entities) return 0;
     LwEntity *target = &state->entities[target_idx];
@@ -593,6 +605,10 @@ int lw_apply_kill(LwState *state, int caster_idx, int target_idx) {
         state->map.entity_at_cell[target->cell_id] = -1;
         target->cell_id = -1;
     }
+    /* Fire on_kill (caster) + on_ally_killed for the target's allies,
+     * matching Python's onPlayerDie hook. */
+    lw_event_on_kill(state, caster_idx);
+    lw_event_on_ally_killed(state, target_idx);
     return lost;
 }
 

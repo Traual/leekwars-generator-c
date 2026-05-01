@@ -94,6 +94,12 @@ int lw_apply_attack_full(LwState *state,
     /* 1. Roll critical (consumes 1 RNG draw). */
     int critical = lw_roll_critical(state, caster_idx);
 
+    /* Python's Fight.useWeapon / useChip fires caster.onCritical()
+     * immediately after generateCritical, BEFORE applyOnCell. */
+    if (critical) {
+        lw_event_on_critical(state, caster_idx);
+    }
+
     /* 2. Roll jet (consumes 1 RNG draw). */
     double jet = lw_rng_double(&state->rng_n);
 
@@ -132,20 +138,29 @@ int lw_apply_attack_full(LwState *state,
             for (int i = 0; i < n_targets; i++) {
                 int tgt_idx = target_entities[i];
                 if (!filter_target(spec->targets_filter, caster_idx, tgt_idx, state)) continue;
+                int from_cell = state->entities[tgt_idx].cell_id;
                 int dest = (t == LW_EFFECT_ATTRACT)
-                         ? lw_compute_attract_dest(state,
-                              state->entities[tgt_idx].cell_id,
+                         ? lw_compute_attract_dest(state, from_cell,
                               target_cell_id, caster->cell_id)
-                         : lw_compute_push_dest(state,
-                              state->entities[tgt_idx].cell_id,
+                         : lw_compute_push_dest(state, from_cell,
                               target_cell_id, caster->cell_id);
-                lw_apply_slide(state, tgt_idx, dest);
+                int moved = lw_apply_slide(state, tgt_idx, dest);
+                if (moved && tgt_idx != caster_idx) {
+                    lw_event_on_moved(state, tgt_idx, caster_idx);
+                }
             }
             continue;
         }
         if (t == LW_EFFECT_TELEPORT) {
-            /* Caster moves to target_cell_id (Python: state.teleportEntity(caster, target, ...)). */
-            lw_apply_teleport(state, caster_idx, target_cell_id);
+            /* Caster moves to target_cell_id (Python: state.teleportEntity). */
+            int from = caster->cell_id;
+            int rc = lw_apply_teleport(state, caster_idx, target_cell_id);
+            /* teleportEntity also calls onMoved(caster, caster); the
+             * passive guard inside lw_event_on_moved skips self-moves
+             * (caster_idx == entity_idx), but Python intentionally
+             * fires this same way -- both behave as no-op self-trigger.
+             * Keep parity by NOT calling on_moved here. */
+            (void)rc; (void)from;
             continue;
         }
 

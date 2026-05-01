@@ -22,6 +22,7 @@
  */
 
 #include "lw_damage.h"
+#include "lw_attack_apply.h"  /* for lw_event_on_* hooks */
 #include <math.h>
 
 
@@ -127,7 +128,20 @@ int lw_apply_damage_v2(LwState *state,
     /* Step 8: target removeLife with erosion. */
     int erosion = (erosion_rate > 0.0)
                 ? java_round((double)dealt * erosion_rate) : 0;
+    int target_was_alive = target->alive;
     lw_remove_life(state, target, dealt, erosion);
+
+    /* Passive event hooks (mirror Python's order: removeLife ->
+     * onDirectDamage -> onNovaDamage). */
+    if (dealt > 0)   lw_event_on_direct_damage(state, target_idx, dealt);
+    if (erosion > 0) lw_event_on_nova_damage(state, target_idx, erosion);
+
+    /* If the target died on this hit, fire on_kill (caster) +
+     * on_ally_killed (allies of the dead, excluding self). */
+    if (target_was_alive && !target->alive) {
+        lw_event_on_kill(state, caster_idx);
+        lw_event_on_ally_killed(state, target_idx);
+    }
 
     /* Step 9: life steal -- heals caster up to missing HP, blocked by
      * UNHEALABLE on caster, no-op if caster died. */
@@ -149,7 +163,19 @@ int lw_apply_damage_v2(LwState *state,
         if (return_damage > 0) {
             int return_erosion = (erosion_rate > 0.0)
                                ? java_round((double)return_damage * erosion_rate) : 0;
+            int caster_was_alive = caster->alive;
             lw_remove_life(state, caster, return_damage, return_erosion);
+            /* Caster takes its own onNovaDamage from the return-damage erosion.
+             * Python doesn't fire onDirectDamage here -- the return-damage path
+             * only does removeLife + onNovaDamage. */
+            if (return_erosion > 0)
+                lw_event_on_nova_damage(state, caster_idx, return_erosion);
+            if (caster_was_alive && !caster->alive) {
+                /* Reflected damage killed the caster. Python's flow has
+                 * the killer be the original target in this case. */
+                lw_event_on_kill(state, target_idx);
+                lw_event_on_ally_killed(state, caster_idx);
+            }
         }
     }
 
