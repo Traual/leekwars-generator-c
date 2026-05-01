@@ -192,24 +192,37 @@ int lw_effect_create(LwState *state, const LwEffectInput *p) {
                            LW_STAT_DAMAGE_RETURN, +1);
             return value;
 
-        /* ---------- raw buffs (no scaling) ---------- */
-#define RAW_BUFF_CASE(EFFECT_ID, STAT_SLOT) \
+        /* ---------- raw buffs (no caster-stat scaling) ---------- */
+        /* Python's EffectRawBuffMP / EffectRawBuffTP have a different
+         * formula: they use ``targetCount * criticalPower`` as the
+         * multiplier, NOT ``aoe * criticalPower`` like the other raw
+         * buffs. So the dispatcher passes tc (instead of aoe) for
+         * those two cases. */
+#define RAW_BUFF_AOE_CASE(EFFECT_ID, STAT_SLOT) \
         case EFFECT_ID: \
             value = lw_apply_raw_buff_stat(state, p->target_idx, STAT_SLOT, \
                                            p->value1, p->value2, p->jet, \
                                            p->aoe, crit_power); \
             register_entry(state, p, value, EFFECT_ID, STAT_SLOT, +1); \
             return value
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_MP,         LW_STAT_MP);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_TP,         LW_STAT_TP);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_STRENGTH,   LW_STAT_STRENGTH);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_MAGIC,      LW_STAT_MAGIC);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_SCIENCE,    LW_STAT_SCIENCE);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_AGILITY,    LW_STAT_AGILITY);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_RESISTANCE, LW_STAT_RESISTANCE);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_WISDOM,     LW_STAT_WISDOM);
-        RAW_BUFF_CASE(LW_EFFECT_RAW_BUFF_POWER,      LW_STAT_POWER);
-#undef RAW_BUFF_CASE
+#define RAW_BUFF_TC_CASE(EFFECT_ID, STAT_SLOT) \
+        case EFFECT_ID: \
+            value = lw_apply_raw_buff_stat(state, p->target_idx, STAT_SLOT, \
+                                           p->value1, p->value2, p->jet, \
+                                           (double)tc, crit_power); \
+            register_entry(state, p, value, EFFECT_ID, STAT_SLOT, +1); \
+            return value
+        RAW_BUFF_TC_CASE(LW_EFFECT_RAW_BUFF_MP,         LW_STAT_MP);
+        RAW_BUFF_TC_CASE(LW_EFFECT_RAW_BUFF_TP,         LW_STAT_TP);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_STRENGTH,   LW_STAT_STRENGTH);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_MAGIC,      LW_STAT_MAGIC);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_SCIENCE,    LW_STAT_SCIENCE);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_AGILITY,    LW_STAT_AGILITY);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_RESISTANCE, LW_STAT_RESISTANCE);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_WISDOM,     LW_STAT_WISDOM);
+        RAW_BUFF_AOE_CASE(LW_EFFECT_RAW_BUFF_POWER,      LW_STAT_POWER);
+#undef RAW_BUFF_AOE_CASE
+#undef RAW_BUFF_TC_CASE
 
         /* ---------- shackles (magic-scaled, negative) ---------- */
 #define SHACKLE_CASE(EFFECT_ID, STAT_SLOT) \

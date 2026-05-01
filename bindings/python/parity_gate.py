@@ -237,18 +237,28 @@ def make_mock_pair(caster_hp, caster_total_hp, target_hp, target_total_hp,
                     caster_base_stats, target_base_stats,
                     caster_buff_stats=None, target_buff_stats=None,
                     caster_state_flags=0, target_state_flags=0):
-    caster = MockEntity(
-        hp=caster_hp, total_hp=caster_total_hp,
-        base_stats=[caster_base_stats.get(i, 0) for i in range(STAT_COUNT)],
-        buff_stats=[(caster_buff_stats or {}).get(i, 0) for i in range(STAT_COUNT)],
-        states=py_state_flags_to_set(caster_state_flags),
-    )
-    target = MockEntity(
-        hp=target_hp, total_hp=target_total_hp,
-        base_stats=[target_base_stats.get(i, 0) for i in range(STAT_COUNT)],
-        buff_stats=[(target_buff_stats or {}).get(i, 0) for i in range(STAT_COUNT)],
-        states=py_state_flags_to_set(target_state_flags),
-    )
+    """Build mock entities matching exactly what add_entity produces
+    on the C side. add_entity sets base_stats[LIFE/TP/MP/FREQUENCY]
+    from defaults (total_tp=10, total_mp=4, frequency=100); we mirror
+    those here so multiply_stats and any other effect that walks the
+    full stat array sees identical inputs in both engines."""
+    def _build(base_stats_in, buff_stats_in, hp, total_hp, state_flags):
+        base = [0] * STAT_COUNT
+        # Defaults that match add_entity's argument defaults.
+        base[LIFE] = total_hp
+        base[TP] = 10
+        base[MP] = 4
+        base[FREQUENCY] = 100
+        for k, v in base_stats_in.items():
+            base[k] = v
+        buff = [(buff_stats_in or {}).get(i, 0) for i in range(STAT_COUNT)]
+        return MockEntity(hp=hp, total_hp=total_hp,
+                          base_stats=base, buff_stats=buff,
+                          states=py_state_flags_to_set(state_flags))
+    caster = _build(caster_base_stats, caster_buff_stats,
+                     caster_hp, caster_total_hp, caster_state_flags)
+    target = _build(target_base_stats, target_buff_stats,
+                     target_hp, target_total_hp, target_state_flags)
     return caster, target
 
 
@@ -256,7 +266,8 @@ def make_mock_pair(caster_hp, caster_total_hp, target_hp, target_total_hp,
 # Comprehensive comparison
 # =====================================================================
 
-def compare_states(c_state, py_caster, py_target, label, trial):
+def compare_states(c_state, py_caster, py_target, label, trial,
+                    check_states=True):
     """Compare every numeric field on both entities. Returns list of
     error strings; empty -> match."""
     errors = []
@@ -283,6 +294,32 @@ def compare_states(c_state, py_caster, py_target, label, trial):
         py_buff_c = py_caster._buff[slot]
         if c_buff_c != py_buff_c:
             errors.append(f"caster.buff[{slot}]: C={c_buff_c} PY={py_buff_c}")
+
+    if check_states:
+        # Compare state flags (e.g. INVINCIBLE / UNHEALABLE) in both
+        # representations. Python's set vs. C's bitfield need translation.
+        c_target_flags = c_state.entity_state_flags(1)
+        c_caster_flags = c_state.entity_state_flags(0)
+        py_target_flags = py_state_flags_to_set(0)  # zero seed
+        py_caster_flags = py_state_flags_to_set(0)
+        # Reconstruct expected C flags from Python's states set.
+        expected_target_c = 0
+        if PY_STATE_INVINCIBLE in py_target._states:
+            expected_target_c |= STATE_INVINCIBLE
+        if PY_STATE_UNHEALABLE in py_target._states:
+            expected_target_c |= STATE_UNHEALABLE
+        expected_caster_c = 0
+        if PY_STATE_INVINCIBLE in py_caster._states:
+            expected_caster_c |= STATE_INVINCIBLE
+        if PY_STATE_UNHEALABLE in py_caster._states:
+            expected_caster_c |= STATE_UNHEALABLE
+        # Mask out C-only bits we don't translate
+        c_target_normalized = c_target_flags & (STATE_INVINCIBLE | STATE_UNHEALABLE)
+        c_caster_normalized = c_caster_flags & (STATE_INVINCIBLE | STATE_UNHEALABLE)
+        if c_target_normalized != expected_target_c:
+            errors.append(f"target.flags: C={c_target_normalized:#x} PY={expected_target_c:#x}")
+        if c_caster_normalized != expected_caster_c:
+            errors.append(f"caster.flags: C={c_caster_normalized:#x} PY={expected_caster_c:#x}")
     return errors
 
 
@@ -749,6 +786,375 @@ def fuzz_raw_buff_strength(n_cases, rng):
     return fails
 
 
+# ---------- Generic helpers for buff/shackle/raw_buff variants -----
+
+def _fuzz_generic_buff(n_cases, rng, py_class, c_method, c_args_extra=()):
+    """Run a science-scaled buff variant against its Python class.
+    c_args_extra are appended after STAT_INDEX, SCALE_STAT (for c
+    methods that take both)."""
+    fails = 0
+    for trial in range(n_cases):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = py_class()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        c_method(s, v1, v2, jet, aoe, crit_pwr, *c_args_extra)
+
+        errs = compare_states(s, py_caster, py_target,
+                               py_class.__name__, trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  {py_class.__name__} trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_buff_agility(n_cases, rng):
+    from leekwars.effect.effect_buff_agility import EffectBuffAgility
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectBuffAgility,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_buff_stat(0, 1, AGILITY, SCIENCE, v1, v2, jet, aoe, crit))
+
+
+def fuzz_buff_mp(n_cases, rng):
+    from leekwars.effect.effect_buff_mp import EffectBuffMP
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectBuffMP,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_buff_stat(0, 1, MP, SCIENCE, v1, v2, jet, aoe, crit))
+
+
+def fuzz_buff_tp(n_cases, rng):
+    from leekwars.effect.effect_buff_tp import EffectBuffTP
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectBuffTP,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_buff_stat(0, 1, TP, SCIENCE, v1, v2, jet, aoe, crit))
+
+
+def fuzz_buff_resistance(n_cases, rng):
+    from leekwars.effect.effect_buff_resistance import EffectBuffResistance
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectBuffResistance,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_buff_stat(0, 1, RESISTANCE, SCIENCE, v1, v2, jet, aoe, crit))
+
+
+def fuzz_buff_wisdom(n_cases, rng):
+    from leekwars.effect.effect_buff_wisdom import EffectBuffWisdom
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectBuffWisdom,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_buff_stat(0, 1, WISDOM, SCIENCE, v1, v2, jet, aoe, crit))
+
+
+def fuzz_damage_return(n_cases, rng):
+    from leekwars.effect.effect_damage_return import EffectDamageReturn
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectDamageReturn,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_buff_stat(0, 1, DAMAGE_RETURN, AGILITY, v1, v2, jet, aoe, crit))
+
+
+def fuzz_shackle_agility(n_cases, rng):
+    from leekwars.effect.effect_shackle_agility import EffectShackleAgility
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectShackleAgility,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_shackle(0, 1, AGILITY, v1, v2, jet, aoe, crit))
+
+
+def fuzz_shackle_mp(n_cases, rng):
+    from leekwars.effect.effect_shackle_mp import EffectShackleMP
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectShackleMP,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_shackle(0, 1, MP, v1, v2, jet, aoe, crit))
+
+
+def fuzz_shackle_tp(n_cases, rng):
+    from leekwars.effect.effect_shackle_tp import EffectShackleTP
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectShackleTP,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_shackle(0, 1, TP, v1, v2, jet, aoe, crit))
+
+
+def fuzz_shackle_magic(n_cases, rng):
+    from leekwars.effect.effect_shackle_magic import EffectShackleMagic
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectShackleMagic,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_shackle(0, 1, MAGIC, v1, v2, jet, aoe, crit))
+
+
+def fuzz_shackle_wisdom(n_cases, rng):
+    from leekwars.effect.effect_shackle_wisdom import EffectShackleWisdom
+    return _fuzz_generic_buff(
+        n_cases, rng, EffectShackleWisdom,
+        lambda s, v1, v2, jet, aoe, crit:
+            s._apply_shackle(0, 1, WISDOM, v1, v2, jet, aoe, crit))
+
+
+# (fuzz_absolute_vulnerability stub removed — replaced by
+# fuzz_absolute_vulnerability_v2 below now that the binding exists.)
+
+
+def fuzz_raw_buff_generic(n_cases, rng, py_class, c_stat_slot,
+                            scale="aoe"):
+    """Raw buff (no scaling) generic fuzzer.
+
+    ``scale`` is "aoe" for the standard formula (v1+v2*jet)*aoe*crit,
+    or "tc" for the EffectRawBuffMP/TP formula
+    (v1+v2*jet)*targetCount*crit -- the C function uses one parameter
+    slot for whichever multiplier the effect demands."""
+    fails = 0
+    for trial in range(n_cases):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        target_count = rng.choice([1, 2, 3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = py_class()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr,
+                            target_count=target_count)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        # Pick the multiplier matching Python's formula for this effect.
+        multiplier = aoe if scale == "aoe" else float(target_count)
+        s._apply_raw_buff_stat(1, c_stat_slot, v1, v2, jet, multiplier, crit_pwr)
+
+        errs = compare_states(s, py_caster, py_target,
+                               py_class.__name__, trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  {py_class.__name__} trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_raw_buff_mp(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_mp import EffectRawBuffMP
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffMP, MP, scale="tc")
+
+def fuzz_raw_buff_tp(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_tp import EffectRawBuffTP
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffTP, TP, scale="tc")
+
+def fuzz_raw_buff_magic(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_magic import EffectRawBuffMagic
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffMagic, MAGIC)
+
+def fuzz_raw_buff_science(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_science import EffectRawBuffScience
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffScience, SCIENCE)
+
+def fuzz_raw_buff_agility(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_agility import EffectRawBuffAgility
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffAgility, AGILITY)
+
+def fuzz_raw_buff_resistance(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_resistance import EffectRawBuffResistance
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffResistance, RESISTANCE)
+
+def fuzz_raw_buff_wisdom(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_wisdom import EffectRawBuffWisdom
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffWisdom, WISDOM)
+
+def fuzz_raw_buff_power(n_cases, rng):
+    from leekwars.effect.effect_raw_buff_power import EffectRawBuffPower
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawBuffPower, POWER)
+
+def fuzz_raw_absolute_shield(n_cases, rng):
+    from leekwars.effect.effect_raw_absolute_shield import EffectRawAbsoluteShield
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawAbsoluteShield, ABS_SHIELD)
+
+def fuzz_raw_relative_shield(n_cases, rng):
+    from leekwars.effect.effect_raw_relative_shield import EffectRawRelativeShield
+    return fuzz_raw_buff_generic(n_cases, rng, EffectRawRelativeShield, REL_SHIELD)
+
+
+def fuzz_raw_heal(n_cases, rng):
+    from leekwars.effect.effect_raw_heal import EffectRawHeal
+    fails = 0
+    for trial in range(n_cases):
+        v1 = rng.uniform(0, 200); v2 = rng.uniform(0, 200); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        target_count = rng.choice([1, 2])
+        target_unhealable = rng.random() < 0.10
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        target_hp = rng.randint(50, 4000); target_total = rng.randint(target_hp, 5000)
+        target_state_c = STATE_UNHEALABLE if target_unhealable else 0
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts,
+            target_state_flags=target_state_c)
+        e = EffectRawHeal()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr,
+                            target_count=target_count)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total,
+                          cs, ts, target_state_flags=target_state_c)
+        s._apply_raw_heal(0, 1, v1, v2, jet, aoe, crit_pwr, target_count)
+
+        errs = compare_states(s, py_caster, py_target, "raw_heal", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  raw_heal trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_steal_life(n_cases, rng):
+    from leekwars.effect.effect_steal_life import EffectStealLife
+    fails = 0
+    for trial in range(n_cases):
+        prev = rng.randint(0, 500)
+        target_unhealable = rng.random() < 0.10
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        target_hp = rng.randint(50, 4000); target_total = rng.randint(target_hp, 5000)
+        target_state_c = STATE_UNHEALABLE if target_unhealable else 0
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts,
+            target_state_flags=target_state_c)
+        e = EffectStealLife()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.previousEffectTotalValue = prev
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total,
+                          cs, ts, target_state_flags=target_state_c)
+        s._apply_steal_life(1, prev)
+
+        errs = compare_states(s, py_caster, py_target, "steal_life", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  steal_life trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_steal_absolute_shield(n_cases, rng):
+    from leekwars.effect.effect_steal_absolute_shield import EffectStealAbsoluteShield
+    fails = 0
+    for trial in range(n_cases):
+        prev = rng.randint(-100, 500)  # negative -> Python's `if value > 0` blocks
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectStealAbsoluteShield()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.previousEffectTotalValue = prev
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_steal_absolute_shield(1, prev)
+
+        errs = compare_states(s, py_caster, py_target, "steal_abs", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  steal_abs trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_absolute_vulnerability_v2(n_cases, rng):
+    from leekwars.effect.effect_absolute_vulnerability import EffectAbsoluteVulnerability
+    fails = 0
+    for trial in range(n_cases):
+        v1 = rng.uniform(0, 100); v2 = rng.uniform(0, 100); jet = rng.uniform(0, 1)
+        aoe = rng.choice([1.0, 0.8, 0.5]); crit_pwr = rng.choice([1.0, 1.3])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        py_caster, py_target = make_mock_pair(1000, 1000, 1000, 1000, cs, ts)
+        e = EffectAbsoluteVulnerability()
+        _set_effect_common(e, v1=v1, v2=v2, jet=jet, aoe=aoe, crit_pwr=crit_pwr)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, 1000, 1000, cs, ts)
+        s._apply_absolute_vulnerability(1, v1, v2, jet, aoe, crit_pwr)
+
+        errs = compare_states(s, py_caster, py_target, "abs_vuln", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  abs_vuln trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_kill(n_cases, rng):
+    from leekwars.effect.effect_kill import EffectKill
+    fails = 0
+    for trial in range(n_cases):
+        target_hp = rng.randint(1, 5000); target_total = rng.randint(target_hp, 5000)
+        target_invincible = rng.random() < 0.05
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        target_state_c = STATE_INVINCIBLE if target_invincible else 0
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts,
+            target_state_flags=target_state_c)
+        e = EffectKill()
+        _set_effect_common(e, v1=0, v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total,
+                          cs, ts, target_state_flags=target_state_c)
+        s._apply_kill(0, 1)
+
+        errs = compare_states(s, py_caster, py_target, "kill", trial,
+                                check_states=False)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  kill trial {trial}: {errs[:3]}")
+    return fails
+
+
+def fuzz_multiply_stats(n_cases, rng):
+    from leekwars.effect.effect_multiply_stats import EffectMultiplyStats
+    fails = 0
+    for trial in range(n_cases):
+        factor = rng.choice([1, 2, 3, 4, 5])
+        cs = random_caster_attrs(rng); ts = random_target_attrs(rng)
+        # Target needs base LIFE for the formula. Set base[LIFE] = total_hp.
+        target_total = rng.randint(500, 5000)
+        target_hp = rng.randint(100, target_total)
+        ts[LIFE] = target_total
+
+        py_caster, py_target = make_mock_pair(
+            1000, 1000, target_hp, target_total, cs, ts)
+        e = EffectMultiplyStats()
+        _set_effect_common(e, v1=float(factor), v2=0, jet=0, aoe=1.0, crit_pwr=1.0)
+        e.caster = py_caster; e.target = py_target
+        e.apply(MockState())
+
+        s = make_c_state(1000, 1000, target_hp, target_total, cs, ts)
+        s._apply_multiply_stats(0, 1, float(factor))
+
+        errs = compare_states(s, py_caster, py_target, "multiply_stats", trial)
+        if errs:
+            fails += 1
+            if fails <= 3:
+                print(f"  multiply_stats f={factor} trial {trial}: {errs[:3]}")
+    return fails
+
+
 # =====================================================================
 # Main
 # =====================================================================
@@ -758,20 +1164,53 @@ def main():
     cases_per_effect = 2000
 
     suites = [
-        ("damage",            fuzz_damage),
-        ("heal",              fuzz_heal),
-        ("absolute_shield",   fuzz_absolute_shield),
-        ("relative_shield",   fuzz_relative_shield),
-        ("buff_strength",     fuzz_buff_strength),
-        ("shackle_strength",  fuzz_shackle_strength),
-        ("aftereffect",       fuzz_aftereffect),
-        ("poison_compute",    fuzz_poison_compute),
-        ("nova_damage",       fuzz_nova_damage),
-        ("life_damage",       fuzz_life_damage),
-        ("vitality",          fuzz_vitality),
-        ("nova_vitality",     fuzz_nova_vitality),
-        ("vulnerability",     fuzz_vulnerability),
-        ("raw_buff_strength", fuzz_raw_buff_strength),
+        # damage / heal / shield core
+        ("damage",                  fuzz_damage),
+        ("heal",                    fuzz_heal),
+        ("absolute_shield",         fuzz_absolute_shield),
+        ("relative_shield",         fuzz_relative_shield),
+        ("aftereffect",             fuzz_aftereffect),
+        ("poison_compute",          fuzz_poison_compute),
+        ("nova_damage",             fuzz_nova_damage),
+        ("life_damage",             fuzz_life_damage),
+        ("vitality",                fuzz_vitality),
+        ("nova_vitality",           fuzz_nova_vitality),
+        ("raw_heal",                fuzz_raw_heal),
+        # 7 buffs (science-scaled, plus DAMAGE_RETURN agility-scaled)
+        ("buff_strength",           fuzz_buff_strength),
+        ("buff_agility",            fuzz_buff_agility),
+        ("buff_mp",                 fuzz_buff_mp),
+        ("buff_tp",                 fuzz_buff_tp),
+        ("buff_resistance",         fuzz_buff_resistance),
+        ("buff_wisdom",             fuzz_buff_wisdom),
+        ("damage_return",           fuzz_damage_return),
+        # 6 shackles (magic-scaled)
+        ("shackle_strength",        fuzz_shackle_strength),
+        ("shackle_agility",         fuzz_shackle_agility),
+        ("shackle_mp",              fuzz_shackle_mp),
+        ("shackle_tp",              fuzz_shackle_tp),
+        ("shackle_magic",           fuzz_shackle_magic),
+        ("shackle_wisdom",          fuzz_shackle_wisdom),
+        # vulnerabilities
+        ("vulnerability",           fuzz_vulnerability),
+        ("absolute_vulnerability",  fuzz_absolute_vulnerability_v2),
+        # 9 raw buffs (no scaling) + raw shields
+        ("raw_buff_strength",       fuzz_raw_buff_strength),
+        ("raw_buff_mp",             fuzz_raw_buff_mp),
+        ("raw_buff_tp",             fuzz_raw_buff_tp),
+        ("raw_buff_magic",          fuzz_raw_buff_magic),
+        ("raw_buff_science",        fuzz_raw_buff_science),
+        ("raw_buff_agility",        fuzz_raw_buff_agility),
+        ("raw_buff_resistance",     fuzz_raw_buff_resistance),
+        ("raw_buff_wisdom",         fuzz_raw_buff_wisdom),
+        ("raw_buff_power",          fuzz_raw_buff_power),
+        ("raw_absolute_shield",     fuzz_raw_absolute_shield),
+        ("raw_relative_shield",     fuzz_raw_relative_shield),
+        # steal / kill / multiply
+        ("steal_life",              fuzz_steal_life),
+        ("steal_absolute_shield",   fuzz_steal_absolute_shield),
+        ("kill",                    fuzz_kill),
+        ("multiply_stats",          fuzz_multiply_stats),
     ]
 
     total_fails = 0

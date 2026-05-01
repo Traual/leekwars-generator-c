@@ -249,6 +249,32 @@ cdef extern from "lw_effects.h":
     int lw_apply_vulnerability(LwState *state, int target_idx,
                                double value1, double value2, double jet,
                                double aoe, double critical_power)
+    int lw_apply_absolute_vulnerability(LwState *state, int target_idx,
+                                        double value1, double value2,
+                                        double jet, double aoe,
+                                        double critical_power)
+    int lw_apply_raw_heal(LwState *state, int caster_idx, int target_idx,
+                          double value1, double value2, double jet,
+                          double aoe, double critical_power, int target_count)
+    int lw_apply_steal_life(LwState *state, int target_idx, int previous_value)
+    int lw_apply_steal_absolute_shield(LwState *state, int target_idx,
+                                        int previous_value)
+    int lw_apply_kill(LwState *state, int caster_idx, int target_idx)
+    int lw_apply_add_state(LwState *state, int target_idx,
+                           unsigned int state_flag)
+    int lw_apply_remove_shackles(LwState *state, int target_idx)
+    int lw_apply_antidote(LwState *state, int target_idx)
+    int lw_apply_debuff(LwState *state, int caster_idx, int target_idx,
+                        double value1, double value2, double jet,
+                        double aoe, double critical_power, int target_count)
+    int lw_apply_total_debuff(LwState *state, int caster_idx, int target_idx,
+                              double value1, double value2, double jet,
+                              double aoe, double critical_power,
+                              int target_count)
+    int lw_apply_multiply_stats(LwState *state, int caster_idx,
+                                int target_idx, double value1)
+    int lw_apply_resurrect(LwState *state, int target_idx, int dest_cell,
+                           int full_life, int critical)
 
 
 # --- Python-side constants -------------------------------------------
@@ -690,6 +716,57 @@ cdef class State:
         return lw_apply_vulnerability(self._s, target_idx,
                                        v1, v2, jet, aoe, crit_pwr)
 
+    def _apply_absolute_vulnerability(self, int target_idx,
+                                       double v1, double v2, double jet,
+                                       double aoe, double crit_pwr):
+        return lw_apply_absolute_vulnerability(self._s, target_idx,
+                                                v1, v2, jet, aoe, crit_pwr)
+
+    def _apply_raw_heal(self, int caster_idx, int target_idx,
+                        double v1, double v2, double jet,
+                        double aoe, double crit_pwr, int target_count):
+        return lw_apply_raw_heal(self._s, caster_idx, target_idx,
+                                  v1, v2, jet, aoe, crit_pwr, target_count)
+
+    def _apply_steal_life(self, int target_idx, int previous_value):
+        return lw_apply_steal_life(self._s, target_idx, previous_value)
+
+    def _apply_steal_absolute_shield(self, int target_idx, int previous_value):
+        return lw_apply_steal_absolute_shield(self._s, target_idx, previous_value)
+
+    def _apply_kill(self, int caster_idx, int target_idx):
+        return lw_apply_kill(self._s, caster_idx, target_idx)
+
+    def _apply_add_state(self, int target_idx, unsigned int state_flag):
+        return lw_apply_add_state(self._s, target_idx, state_flag)
+
+    def _apply_remove_shackles(self, int target_idx):
+        return lw_apply_remove_shackles(self._s, target_idx)
+
+    def _apply_antidote(self, int target_idx):
+        return lw_apply_antidote(self._s, target_idx)
+
+    def _apply_debuff(self, int caster_idx, int target_idx,
+                      double v1, double v2, double jet,
+                      double aoe, double crit_pwr, int target_count):
+        return lw_apply_debuff(self._s, caster_idx, target_idx,
+                                v1, v2, jet, aoe, crit_pwr, target_count)
+
+    def _apply_total_debuff(self, int caster_idx, int target_idx,
+                             double v1, double v2, double jet,
+                             double aoe, double crit_pwr, int target_count):
+        return lw_apply_total_debuff(self._s, caster_idx, target_idx,
+                                      v1, v2, jet, aoe, crit_pwr, target_count)
+
+    def _apply_multiply_stats(self, int caster_idx, int target_idx,
+                               double value1):
+        return lw_apply_multiply_stats(self._s, caster_idx, target_idx, value1)
+
+    def _apply_resurrect(self, int target_idx, int dest_cell,
+                         int full_life, int critical):
+        return lw_apply_resurrect(self._s, target_idx, dest_cell,
+                                   full_life, critical)
+
     def _apply_erosion(self, int target_idx, int value, double rate):
         return lw_apply_erosion(self._s, target_idx, value, rate)
 
@@ -731,6 +808,9 @@ cdef class State:
 
     def entity_n_effects(self, int idx):
         return self._s.entities[idx].n_effects
+
+    def entity_state_flags(self, int idx):
+        return self._s.entities[idx].state_flags
 
     def entity_base_stat(self, int idx, int stat_index):
         return self._s.entities[idx].base_stats[stat_index]
