@@ -17,7 +17,11 @@
 
 /* ------------ free-list of recycled State structs ----------------- */
 
-#define LW_POOL_CAP  4096
+/* Per-process pool cap. 4096 was overkill (1 GB per worker × 8 workers
+ * easily OOM'd on 16-32 GB boxes during beam-vs-beam training data
+ * generation). Beam search peaks at ~200 live clones per turn, so 256
+ * is enough to amortise the calloc cost without inflating RSS. */
+#define LW_POOL_CAP  256
 
 static LwState *g_pool[LW_POOL_CAP];
 static int      g_pool_n = 0;

@@ -144,9 +144,14 @@ int lw_apply_damage_v2(LwState *state,
     if (erosion > 0) lw_event_on_nova_damage(state, target_idx, erosion);
 
     /* If the target died on this hit, fire on_kill (caster) +
-     * on_ally_killed (allies of the dead, excluding self). */
+     * on_ally_killed (allies of the dead, excluding self).
+     *
+     * Python does NOT emit ActionKill for damage-induced deaths --
+     * only EffectKill (Effect.TYPE_KILL, the one-shot kill effect)
+     * emits ActionKill. Damage-deaths are signalled implicitly by the
+     * LOST_LIFE event reducing target HP to 0. We mirror that here:
+     * fire the passive hooks but DO NOT emit LW_ACT_KILL. */
     if (target_was_alive && !target->alive) {
-        lw_action_emit(state, LW_ACT_KILL, caster_idx, target_idx, 0, 0, 0);
         lw_event_on_kill(state, caster_idx);
         lw_event_on_ally_killed(state, target_idx);
     }

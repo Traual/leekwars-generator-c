@@ -242,7 +242,13 @@ static int apply_use_chip_stub(LwState *s, int idx, const LwAction *a) {
 
 /* If the catalog has the item, run the byte-for-byte attack pipeline
  * AND charge TP. Returns 1 on success (TP charged + effects applied),
- * 0 if pipeline rejected (caller should fall back). */
+ * 0 if rejected (e.g. target out of range). The caller decides
+ * whether to fall back to the simplified stub.
+ *
+ * Range / cell sanity checks are done HERE rather than in
+ * lw_apply_attack_full so the pipeline stays a low-level "apply
+ * effects to whichever cells are in the area" primitive that the AI
+ * search can also call directly without re-checking range. */
 static int apply_use_via_catalog(LwState *s, int idx,
                                  const LwAction *a, int item_id) {
     const LwAttackSpec *spec = lw_catalog_get(item_id);
@@ -251,6 +257,22 @@ static int apply_use_via_catalog(LwState *s, int idx,
     LwEntity *e = &s->entities[idx];
     int avail_tp = (e->base_stats[LW_STAT_TP] + e->buff_stats[LW_STAT_TP]) - e->used_tp;
     if (avail_tp < spec->tp_cost) return 0;
+
+    /* Range check on the action target -- mirrors Attack.canUseAttack
+     * in Python. Without this, out-of-range fires silently consumed
+     * TP and emitted an empty USE_WEAPON entry, which broke fight
+     * termination for AIs that fire greedily at cells beyond their
+     * weapon's range. */
+    if (e->cell_id < 0 || s->map.topo == NULL) return 0;
+    int target_cell = a->target_cell_id;
+    if (target_cell < 0 || target_cell >= s->map.topo->n_cells) return 0;
+    int dx = s->map.topo->cells[e->cell_id].x - s->map.topo->cells[target_cell].x;
+    int dy = s->map.topo->cells[e->cell_id].y - s->map.topo->cells[target_cell].y;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    int manhattan = dx + dy;
+    if (manhattan < spec->min_range) return 0;
+    if (manhattan > spec->max_range) return 0;
 
     /* Run the byte-for-byte pipeline. It rolls critical + jet,
      * enumerates the area, and applies all effects. */
@@ -276,17 +298,25 @@ int lw_apply_action(LwState *state,
         case LW_ACTION_MOVE:       return apply_move(state, entity_index, action);
 
         case LW_ACTION_USE_WEAPON:
-            /* Prefer the catalog path (byte-for-byte parity); fall
-             * back to the deterministic stub when the item id isn't
-             * registered. The stub keeps tests + AI search working
-             * even if the caller forgot to populate the catalog. */
-            if (apply_use_via_catalog(state, entity_index, action,
-                                       action->weapon_id)) return 1;
+            /* If the item IS registered in the catalog, the catalog
+             * path is authoritative -- we must NOT fall back to the
+             * stub when it rejects (e.g. insufficient TP, out of
+             * range), or the stub's hardcoded cost=5 / dmg=100 would
+             * silently succeed and break parity with Python.
+             *
+             * Only use the stub when the item id is unknown to the
+             * catalog (lw_catalog_get returns NULL) -- this preserves
+             * the historical "tests still work without registering"
+             * behavior. */
+            if (lw_catalog_get(action->weapon_id) != NULL)
+                return apply_use_via_catalog(state, entity_index, action,
+                                              action->weapon_id);
             return apply_use_weapon_stub(state, entity_index, action);
 
         case LW_ACTION_USE_CHIP:
-            if (apply_use_via_catalog(state, entity_index, action,
-                                       action->chip_id)) return 1;
+            if (lw_catalog_get(action->chip_id) != NULL)
+                return apply_use_via_catalog(state, entity_index, action,
+                                              action->chip_id);
             return apply_use_chip_stub(state, entity_index, action);
 
         default:                   return 0;

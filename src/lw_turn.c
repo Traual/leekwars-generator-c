@@ -165,11 +165,28 @@ int lw_entity_end_turn(LwState *state, int entity_idx) {
     /* Python's endTurn does NOT decrement turns. The decrement lives in
      * the next entity's startTurn (their launchedEffects walk).
      *
-     * We keep this entry point because callers wired it in expecting
-     * a counterpart to entity_start_turn, but it's a no-op now. The
-     * legacy lw_turn_end is still exposed for tests that explicitly
-     * want to decrement an entity's own effects[] (test_turn.c uses
-     * it for unit-level coverage of decrement_turns). */
-    (void)state; (void)entity_idx;
+     * We DO emit LW_ACT_END_TURN to mirror Python's
+     *   self.state.getActions().log(ActionEndTurn(current))
+     * call inside Fight.startTurn (after the AI runs, before the global
+     * State.endTurn). The Python action JSON is
+     *   [8, leek_fid, used_tp, used_mp]
+     * so we put used_tp / used_mp into v1 / v2.
+     */
+    if (state == NULL) return 0;
+    if (entity_idx < 0 || entity_idx >= state->n_entities) return 0;
+    LwEntity *e = &state->entities[entity_idx];
+    /* Python flow (Fight.startTurn):
+     *   current.endTurn()  -> resets usedTP=0, usedMP=0
+     *   log(ActionEndTurn(current))  -> reads getTP() = totalTP - 0 = totalTP
+     * So the END_TURN action stores the FULL totalTP / totalMP, not
+     * the just-used or just-remaining values. We mirror that order:
+     * reset used_tp / used_mp first, then emit the (now full) total.
+     */
+    e->used_tp = 0;
+    e->used_mp = 0;
+    int total_tp = e->base_stats[LW_STAT_TP] + e->buff_stats[LW_STAT_TP];
+    int total_mp = e->base_stats[LW_STAT_MP] + e->buff_stats[LW_STAT_MP];
+    lw_action_emit(state, LW_ACT_END_TURN, entity_idx, -1,
+                    total_tp, total_mp, 0);
     return 0;
 }
