@@ -79,11 +79,28 @@ LwEntity* lw_entity_new(int type) {
     return e;
 }
 
-/* Java: returns the BUFF_POWER stat value (used in colossus init).
- * Stored as buff_stats[LW_STAT_POWER] in our model. */
+/* Java: in onPlayerDie BR branch:
+ *   var effect = entity.getEffects().stream()
+ *      .filter(e -> e.getAttack() == null && e.getID() == Effect.TYPE_RAW_BUFF_POWER)
+ *      .findAny().orElse(null);
+ *   if (effect != null) amount += (int)(effect.value / 2);
+ *
+ * Returns (effect.value / 2) for the first matching effect, or 0.
+ *
+ * NOTE: previously returned m_buff_stats.stats[LW_STAT_POWER] which is the
+ * AGGREGATE buff value, not effect.value/2. That bug caused BR fights with
+ * power-buffed dyings to diverge from upstream by exactly value/2. */
 int lw_entity_get_effect_buffpower_value(const LwEntity *self) {
     if (self == NULL) return 0;
-    return self->m_buff_stats.stats[LW_STAT_POWER];
+    int n = lw_entity_get_effects_count((LwEntity *)self);
+    for (int i = 0; i < n; i++) {
+        struct LwEffect *e = lw_entity_get_effect_at((LwEntity *)self, i);
+        if (lw_effect_get_attack(e) == NULL &&
+            lw_effect_get_id(e) == LW_EFFECT_TYPE_RAW_BUFF_POWER) {
+            return lw_effect_get_value(e) / 2;
+        }
+    }
+    return 0;
 }
 
 /* Java: state.getTeamEntities(team) returns an ArrayList<Entity>.
