@@ -15,6 +15,7 @@
 #include "lw_generator.h"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -375,6 +376,13 @@ int lw_generator_run_scenario(LwGenerator *self,
                 ai_file = entity_info->ai_file;
             }
             lw_entity_set_ai_file(entity, ai_file);
+            /* Java: EntityAI.resolve() builds an EntityAI and assigns it to
+             * entity.ai. The C engine doesn't run leekscript -- the AI is a
+             * Python callback installed via lw_fight_set_ai_dispatch. We
+             * mark entity.ai non-NULL with a sentinel so fight.startTurn()
+             * dispatches; the actual logic is in the Python callback. */
+            extern void lw_entity_set_ai(struct LwEntity *e, void *ai);
+            lw_entity_set_ai(entity, (void*)(uintptr_t)1);
         }
     }
 

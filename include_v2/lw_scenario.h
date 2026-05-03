@@ -54,6 +54,7 @@ struct LwState;
  * State.init(). */
 typedef struct {
     int present;             /* 0 = no custom map (use default) */
+    int id;                  /* map id; non-zero means "respect entity initial_cell" */
     int width;
     int height;
     int n_obstacles;
@@ -61,6 +62,13 @@ typedef struct {
      * [cell, type] pairs). */
     int obstacles_cell[LW_SCENARIO_MAP_OBSTACLES];
     int obstacles_type[LW_SCENARIO_MAP_OBSTACLES];
+    /* Java: custom_map.team1 / .team2 = list of cell ids to place each
+     * team's entities at. The Map.generateMap loop overrides the random
+     * cell with these when present. */
+    int team1[LW_SCENARIO_MAX_ENTITIES_PER_TEAM];
+    int n_team1;
+    int team2[LW_SCENARIO_MAX_ENTITIES_PER_TEAM];
+    int n_team2;
 } LwCustomMap;
 
 

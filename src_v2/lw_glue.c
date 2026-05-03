@@ -19,6 +19,7 @@
  */
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -442,10 +443,11 @@ int lw_team_get_entity_count(const LwTeam *self) {
 
 int lw_team_get_entity_idx(const LwTeam *self, int idx) {
     if (self == NULL || idx < 0 || idx >= self->n_entities) return -1;
-    /* Returns the entity index -- but Team only stores LwEntity*. The
-     * State has the master m_entities[] index. Without access to State
-     * here, return -1 (parity tests don't use this path). */
-    return -1;
+    /* lw_state_get_entity is keyed by entity FID, not array index.
+     * lw_map_generate_map_impl calls lw_state_get_entity(state, this),
+     * so we return the FID. */
+    LwEntity *e = self->entities[idx];
+    return e ? lw_entity_get_fid(e) : -1;
 }
 
 /* Leek alias: get the cell the leek is on. Just the Entity getter. */
@@ -460,6 +462,69 @@ int lw_entity_get_cell_id(const LwEntity *self) {
     if (self == NULL) return -1;
     LwCell *c = lw_entity_get_cell((LwEntity*)self);
     return c ? lw_cell_get_id(c) : -1;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Helpers exposed through the Cython binding for the AI loop.      */
+
+/* Find the index of an entity in state->m_entities[]. Returns -1 if
+ * not present. Used by the AI trampoline to give Python an int idx. */
+int lw_state_index_of_entity(const struct LwState *state, const LwEntity *entity) {
+    if (state == NULL || entity == NULL) return -1;
+    for (int i = 0; i < state->n_entities; i++) {
+        if (state->m_entities[i] == entity) return i;
+    }
+    return -1;
+}
+
+/* Direct getters used by the binding (avoid extern-of-static-inline). */
+int     lw_glue_entity_alive    (const LwEntity *e) { return e ? lw_entity_is_alive(e) : 0; }
+int     lw_glue_entity_hp       (const LwEntity *e) { return e ? lw_entity_get_life(e) : 0; }
+int     lw_glue_entity_fid      (const LwEntity *e) { return e ? lw_entity_get_fid(e) : -1; }
+int     lw_glue_entity_team     (const LwEntity *e) { return e ? lw_entity_get_team(e) : -1; }
+int     lw_glue_entity_cell_id  (const LwEntity *e) {
+    if (e == NULL) return -1;
+    LwCell *c = lw_entity_get_cell((LwEntity*)e);
+    return c ? lw_cell_get_id(c) : -1;
+}
+int     lw_glue_entity_used_tp  (const LwEntity *e) { return e ? e->used_tp : 0; }
+int     lw_glue_entity_used_mp  (const LwEntity *e) { return e ? e->used_mp : 0; }
+
+/* Set the AI marker on an entity (so fight.startTurn dispatches it).
+ * Called by the binding after add_entity. */
+void lw_glue_entity_mark_has_ai(LwEntity *e) {
+    if (e != NULL) lw_entity_set_ai(e, (void*)(size_t)1);
+}
+
+/* High-level apply_use_weapon: take entity by state index + cell id,
+ * resolve to LwEntity* + LwCell*, call lw_state_use_weapon. Returns the
+ * Attack.USE_* result code. */
+extern struct LwWeapon* lw_weapons_get_weapon(int id);
+extern int lw_state_set_weapon(struct LwState *self, struct LwEntity *e, struct LwWeapon *w);
+extern int lw_state_use_weapon(struct LwState *self, struct LwEntity *launcher, struct LwCell *target);
+
+int lw_glue_apply_use_weapon(struct LwState *state, int entity_idx,
+                              int weapon_id, int target_cell_id) {
+    if (state == NULL) return -100;
+    if (entity_idx < 0 || entity_idx >= state->n_entities) return -101;
+    LwEntity *launcher = state->m_entities[entity_idx];
+    if (launcher == NULL) return -102;
+    LwMap *map = state->map;
+    if (map == NULL) return -103;
+    LwCell *target = lw_map_get_cell(map, target_cell_id);
+    if (target == NULL) return -104;
+
+    /* Java: state.useWeapon checks `launcher.getWeapon() != null`. We
+     * equip the requested weapon first (no TP cost / no log -- the C
+     * setWeapon() in state.c logs SET_WEAPON which doesn't match the
+     * always-fire Python test). Use entity.setWeapon() directly. */
+    struct LwWeapon *w = lw_weapons_get_weapon(weapon_id);
+    if (w == NULL) return -105;
+    extern void lw_entity_set_weapon(struct LwEntity *e, struct LwWeapon *w);
+    lw_entity_set_weapon(launcher, w);
+
+    return lw_state_use_weapon(state, launcher, target);
 }
 
 
@@ -524,18 +589,41 @@ extern void lw_map_generate_map_impl(struct LwMap *out_map,
                                       const int *custom_team1, int n_team1,
                                       const int *custom_team2, int n_team2);
 
-/* Single-arg wrapper: allocate an LwMap, call the impl with sentinels. */
+/* Single-arg wrapper: allocate an LwMap, unpack the LwCustomMap, call
+ * the impl with explicit fields. */
+#include "lw_scenario.h"
+
 struct LwMap* lw_map_generate_map(struct LwState *state, int context,
                                    int width, int height, int obstacles_count,
                                    struct LwTeam **teams, int n_teams,
                                    void *custom_map) {
-    (void)custom_map;  /* TODO: parse the custom_map struct when binding sets it */
     LwMap *m = (LwMap*) calloc(1, sizeof(LwMap));
     if (m == NULL) return NULL;
-    /* No custom map -> pass sentinels (Map.java treats custom_map==null as
-     * "generate random obstacles"). */
-    lw_map_generate_map_impl(m, state, context, width, height, obstacles_count,
-                              teams, n_teams,
-                              -1, -1, -1, NULL, 0, NULL, 0, NULL, 0);
+
+    LwCustomMap *cm = (LwCustomMap*)custom_map;
+    if (cm == NULL || !cm->present) {
+        /* No custom map -> Java treats custom_map==null as "generate
+         * random obstacles". */
+        lw_map_generate_map_impl(m, state, context, width, height, obstacles_count,
+                                  teams, n_teams,
+                                  -1, -1, -1, NULL, 0, NULL, 0, NULL, 0);
+    } else {
+        /* Build LwCustomObstacle[] view from parallel int arrays. */
+        LwCustomObstacle obs[LW_SCENARIO_MAP_OBSTACLES];
+        int n_obs = cm->n_obstacles;
+        if (n_obs > LW_SCENARIO_MAP_OBSTACLES) n_obs = LW_SCENARIO_MAP_OBSTACLES;
+        for (int i = 0; i < n_obs; i++) {
+            obs[i].cell_id = cm->obstacles_cell[i];
+            obs[i].kind    = cm->obstacles_type[i];  /* Java: obstacle id */
+        }
+        lw_map_generate_map_impl(m, state, context, width, height, obstacles_count,
+                                  teams, n_teams,
+                                  cm->id, /* custom_map_id */
+                                  -1, /* custom_pattern */
+                                  -1, /* custom_type */
+                                  obs, n_obs,
+                                  cm->team1, cm->n_team1,
+                                  cm->team2, cm->n_team2);
+    }
     return m;
 }

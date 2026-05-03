@@ -183,6 +183,21 @@ cdef extern from "lw_entity_info.h":
 cdef extern from "lw_scenario.h":
     int LW_SCENARIO_MAX_FARMERS
     int LW_SCENARIO_MAX_TEAMS
+    int LW_SCENARIO_MAX_ENTITIES_PER_TEAM
+    int LW_SCENARIO_MAP_OBSTACLES
+
+    ctypedef struct LwCustomMap:
+        int present
+        int id
+        int width
+        int height
+        int n_obstacles
+        int obstacles_cell[256]
+        int obstacles_type[256]
+        int team1[16]
+        int n_team1
+        int team2[16]
+        int n_team2
 
     ctypedef struct LwScenario:
         int64_t       seed
@@ -192,6 +207,7 @@ cdef extern from "lw_scenario.h":
         int           fight_id
         int           boss
         int           draw_check_life
+        LwCustomMap   map
         # opaque internal arrays
 
     void lw_scenario_init(LwScenario *self)
@@ -250,7 +266,53 @@ cdef extern from "lw_weapon.h":
     LwWeapon *lw_weapons_get_weapon(int id)
 
 
+cdef extern from "lw_entity.h":
+    ctypedef struct LwEntity:
+        pass
+
+
+# Helpers exposed by lw_glue.c (avoids extern-of-static-inline issues).
+cdef extern:
+    int      lw_state_index_of_entity(const LwState *state, const LwEntity *e)
+    LwEntity* lw_state_get_entity_at  (LwState *state, int idx)
+    int      lw_state_n_entities      (const LwState *state)
+    int      lw_glue_entity_alive    (const LwEntity *e)
+    int      lw_glue_entity_hp       (const LwEntity *e)
+    int      lw_glue_entity_fid      (const LwEntity *e)
+    int      lw_glue_entity_team     (const LwEntity *e)
+    int      lw_glue_entity_cell_id  (const LwEntity *e)
+    int      lw_glue_entity_used_tp  (const LwEntity *e)
+    int      lw_glue_entity_used_mp  (const LwEntity *e)
+    void     lw_glue_entity_mark_has_ai(LwEntity *e)
+    int      lw_glue_apply_use_weapon(LwState *state, int entity_idx,
+                                       int weapon_id, int target_cell_id)
+
+
+# Generator AI dispatch hook
+cdef extern from "lw_generator.h":
+    void lw_generator_set_ai_dispatch(LwGenerator *self,
+                                      lw_fight_ai_dispatch_t fn,
+                                      void *userdata)
+
+
 # ===================== Python-side wrappers ======================
+
+# C trampoline that the Fight calls on each entity's turn. It dispatches
+# to the Python callback installed via Engine.set_ai_callback.
+cdef int _ai_trampoline(void *fight, void *entity, void *ai_file,
+                         int turn, void *userdata) noexcept with gil:
+    cdef Engine eng = <Engine>userdata
+    cdef LwEntity *e = <LwEntity*>entity
+    cdef int idx = lw_state_index_of_entity(&eng.state, e)
+    if eng._ai_callback is None:
+        return 0
+    try:
+        ret = eng._ai_callback(idx, turn)
+        return int(ret) if ret is not None else 0
+    except Exception:
+        import traceback; traceback.print_exc()
+        return -1
+
 
 cdef class Engine:
     """Top-level container for a single fight."""
@@ -277,6 +339,19 @@ cdef class Engine:
         self.scenario.type = LW_FIGHT_TYPE_SOLO
         self.scenario.context = LW_CONTEXT_TEST
         self.scenario.seed = 1
+        # Wire the AI trampoline -- the actual Python callback is set
+        # via set_ai_callback below.
+        lw_generator_set_ai_dispatch(&self.generator, _ai_trampoline,
+                                      <void*>self)
+
+    def set_ai_callback(self, callback):
+        """Register a Python function called once per entity per turn.
+
+        Signature: callback(entity_idx, turn) -> int (operation count).
+        Inside the callback, use eng.fire_weapon(entity_idx, weapon_id,
+        cell) etc. to apply actions.
+        """
+        self._ai_callback = callback
 
     # ---- bootstrap registries ----
     def add_weapon(self, int item_id, str name, int cost,
@@ -381,6 +456,37 @@ cdef class Engine:
     def set_max_turns(self, int n):
         self.scenario.max_turns = n
 
+    def set_custom_map(self, dict obstacles=None, list team1=None, list team2=None,
+                        int map_id=0, int width=18, int height=18):
+        """Configure a custom map: obstacles dict {cell_id: type_id},
+        team1/team2 cell lists. Use map_id != 0 to mean "respect entity
+        initial_cell during placement". The Python upstream uses id=0
+        with team1/team2 lists for parity tests."""
+        cdef int i
+        memset(&self.scenario.map, 0, sizeof(LwCustomMap))
+        self.scenario.map.present = 1
+        self.scenario.map.id = map_id
+        self.scenario.map.width = width
+        self.scenario.map.height = height
+        if obstacles:
+            items = list(obstacles.items())
+            n = min(len(items), 256)
+            self.scenario.map.n_obstacles = n
+            for i in range(n):
+                k, v = items[i]
+                self.scenario.map.obstacles_cell[i] = int(k)
+                self.scenario.map.obstacles_type[i] = int(v)
+        if team1:
+            n = min(len(team1), 16)
+            self.scenario.map.n_team1 = n
+            for i in range(n):
+                self.scenario.map.team1[i] = int(team1[i])
+        if team2:
+            n = min(len(team2), 16)
+            self.scenario.map.n_team2 = n
+            for i in range(n):
+                self.scenario.map.team2[i] = int(team2[i])
+
     # ---- run ----
     def run(self):
         """Run the scenario; returns winner team id (or -1)."""
@@ -389,6 +495,44 @@ cdef class Engine:
             NULL, NULL, NULL,
             &self.state, &self.fight, &self.outcome)
         return rc
+
+    # ---- low-level entity access (called from inside the AI callback) ----
+    def n_entities(self):
+        return self.state.n_entities
+
+    cdef LwEntity* _entity_at(self, int idx) except NULL:
+        cdef int n = lw_state_n_entities(&self.state)
+        cdef LwEntity *e
+        if idx < 0 or idx >= n:
+            raise IndexError("entity_idx out of range")
+        e = lw_state_get_entity_at(&self.state, idx)
+        if e == NULL:
+            raise RuntimeError("entity is NULL")
+        return e
+
+    def entity_alive(self, int idx):
+        return bool(lw_glue_entity_alive(self._entity_at(idx)))
+    def entity_hp(self, int idx):
+        return lw_glue_entity_hp(self._entity_at(idx))
+    def entity_fid(self, int idx):
+        return lw_glue_entity_fid(self._entity_at(idx))
+    def entity_team(self, int idx):
+        return lw_glue_entity_team(self._entity_at(idx))
+    def entity_cell(self, int idx):
+        return lw_glue_entity_cell_id(self._entity_at(idx))
+    def entity_used_tp(self, int idx):
+        return lw_glue_entity_used_tp(self._entity_at(idx))
+    def entity_used_mp(self, int idx):
+        return lw_glue_entity_used_mp(self._entity_at(idx))
+
+    def fire_weapon(self, int entity_idx, int weapon_id, int target_cell):
+        """Apply a USE_WEAPON action. Returns Attack.USE_* result code:
+            2 = USE_CRITICAL, 1 = USE_SUCCESS,
+           -1 = INVALID_TARGET, -2 = NOT_ENOUGH_TP,
+           -4 = INVALID_POSITION, etc.
+        """
+        return lw_glue_apply_use_weapon(&self.state, entity_idx,
+                                         weapon_id, target_cell)
 
     # ---- read action stream ----
     def stream_dump(self):
