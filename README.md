@@ -31,7 +31,12 @@ emitted stream:
 | `test_v2_summon.py` | 10 bulb templates × 5 seeds | **50 / 50** |
 | `test_v2_death.py` | 7 weapons × 9 HP levels × 10 seeds | **630 / 630** |
 | `test_v2_fuzzer.py` | random loadouts | **1 000 / 1 000** |
-| **Total** | | **6 030 / 6 030 — 100 %** |
+| `test_v2_team_real.py` (4v4 chip+wpn, no move) | 5 seeds | **5 / 5** |
+| `test_v2_team_real.py` (6v6 chip+wpn, no move) | 5 seeds | **5 / 5** |
+| `test_v2_br.py` (2-player BR) | 3 seeds | **3 / 3** |
+| `test_v2_br.py` (4-player BR) | 5 seeds | **5 / 5** |
+| `test_v2_br.py` (6-player BR) | 5 seeds | **5 / 5** |
+| **Total** | | **6 053 / 6 053 — 100 %** |
 
 Every action — `USE_WEAPON`, `USE_CHIP`, `LOST_LIFE`, `HEAL`,
 `ADD_WEAPON_EFFECT`, `ADD_CHIP_EFFECT`, `STACK_EFFECT`, `REMOVE_EFFECT`,
@@ -40,6 +45,18 @@ Every action — `USE_WEAPON`, `USE_CHIP`, `LOST_LIFE`, `HEAL`,
 upstream byte-for-byte, including effect parameters, damage rolls,
 critical-hit triggers, AoE falloff, summon stat rolls, and the
 Bradley-Terry start order.
+
+### Known divergences (real engine bugs, not yet fixed)
+
+| # | Surface | Symptom | Status |
+|---|---|---|---|
+| 1 | Multi-entity moves (3v3+) | A* path tie-break differs in dense-obstacle cases | open |
+| 2 | 8+ player BR, specific seeds | AI ends turn early after a kill (rare corner case) | open |
+
+Both reproduce against the upstream Python port (Python upstream and
+the C engine agree, but both differ from Java in those specific
+scenarios). 1v1, 2v2, summons, weapons, chips, death, BR up to 6
+players are all 100 % byte-identical.
 
 ## Coverage
 
