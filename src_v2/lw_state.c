@@ -1414,24 +1414,12 @@ int lw_state_summon_entity_named(LwState *self, struct LwEntity *caster, struct 
 
     struct LwAttack *atk = lw_chip_get_attack(template_);
     struct LwEffectParameters *params = lw_attack_get_effect_params_by_type(atk, LW_EFFECT_TYPE_SUMMON);
-    if (lw_order_current(&self->order) != caster || params == NULL) {
-        return -1;
-    }
-    if (lw_chip_get_cost(template_) > lw_entity_get_tp(caster)) {
-        return -2;
-    }
-    if (lw_state_has_cooldown(self, caster, template_)) {
-        return -3;
-    }
-    if (!lw_map_can_use_attack(self->map, lw_entity_get_cell(caster), target, atk)) {
-        return -4;
-    }
-    if (!lw_cell_available(target, self->map)) {
-        return -4;
-    }
-    if (lw_team_get_summon_count(self->teams[lw_entity_get_team(caster)]) >= LW_SUMMON_LIMIT) {
-        return -5;
-    }
+    if (lw_order_current(&self->order) != caster || params == NULL) return -1;
+    if (lw_chip_get_cost(template_) > lw_entity_get_tp(caster)) return -2;
+    if (lw_state_has_cooldown(self, caster, template_)) return -3;
+    if (!lw_map_can_use_attack(self->map, lw_entity_get_cell(caster), target, atk)) return -4;
+    if (!lw_cell_available(target, self->map)) return -4;
+    if (lw_team_get_summon_count(self->teams[lw_entity_get_team(caster)]) >= LW_SUMMON_LIMIT) return -5;
 
     int critical = lw_state_generate_critical(self, caster);
     int result = critical ? LW_ATTACK_USE_CRITICAL : LW_ATTACK_USE_SUCCESS;

@@ -235,13 +235,12 @@ void lw_map_clone(LwMap *dst, const LwMap *src, struct LwState *new_state) {
  * NOTE: cellByEntity is implicit -- LwEntity already holds its own
  * cell_id (lw_entity_set_cell), so we only need entity_at_cell[].
  */
-void lw_map_set_entity(LwMap *self, int entity_idx, LwCell *cell) {
-    if (cell == NULL) return;
-    self->entity_at_cell[cell->id] = entity_idx;
-    if (self->state != NULL) {
-        struct LwEntity *e = lw_state_get_entity(self->state, entity_idx);
-        if (e != NULL) lw_entity_set_cell(e, cell);
-    }
+void lw_map_set_entity(LwMap *self, struct LwEntity *e, LwCell *cell) {
+    if (cell == NULL || e == NULL) return;
+    /* Java: entityByCell.put(cell, entity); cellByEntity.put(entity, cell);
+     * In C we key entity_at_cell by FID so it matches state.getEntity(fid). */
+    self->entity_at_cell[cell->id] = lw_entity_get_fid(e);
+    lw_entity_set_cell(e, cell);
 }
 
 
@@ -1114,7 +1113,10 @@ void lw_map_generate_map_impl(LwMap *out_map,
                     }
                 }
                 if (c != NULL) {
-                    lw_map_set_entity(out_map, entity_idx, c);
+                    /* entity_idx is the entity's FID; resolve to LwEntity*
+                     * for the new lw_map_set_entity signature. */
+                    struct LwEntity *resolved = lw_state_get_entity(state, entity_idx);
+                    if (resolved != NULL) lw_map_set_entity(out_map, resolved, c);
                 }
             }
         }

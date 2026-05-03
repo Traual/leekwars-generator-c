@@ -15,6 +15,7 @@
 #include "lw_fight.h"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -720,10 +721,14 @@ int lw_fight_summon_entity_named(LwFight *self, struct LwEntity *caster,
         struct LwEntity *summon = lw_state_get_last_entity(self->state);
         lw_entity_set_fight(summon, self);
         lw_entity_set_birth_turn(summon, lw_fight_get_turn(self));
-        /* setAI(new BulbAI(summon, caster.getAI(), value));
-         * In C: store the FunctionLeekValue as the AI handle; the
-         * dispatcher handles the BulbAI semantics. */
         (void)caster;
+        /* Set ai to whatever LeekScript value the caller passed.
+         * value=NULL means "no AI function" -- Java's BulbAI.runIA()
+         * with null function returns null, so the bulb's turn becomes
+         * a pure no-op. We match by leaving ai=NULL so the dispatcher
+         * skips it entirely; the action stream still has LEEK_TURN +
+         * END_TURN for the bulb's turn (logged by fight.startTurn
+         * before the AI dispatch check). */
         lw_entity_set_ai(summon, value);
     }
     return result;

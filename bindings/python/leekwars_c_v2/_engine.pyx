@@ -306,10 +306,13 @@ cdef extern:
     void     lw_glue_entity_mark_has_ai(LwEntity *e)
     int      lw_glue_apply_use_weapon(LwState *state, int entity_idx,
                                        int weapon_id, int target_cell_id)
+    int      lw_glue_apply_use_chip  (LwState *state, LwFight *fight,
+                                       int entity_idx, int chip_id,
+                                       int target_cell_id)
     int      lw_glue_move_toward_cell  (LwState *state, int entity_idx,
                                           int target_cell_id, int max_mp)
-    int      lw_glue_apply_use_chip  (LwState *state, int entity_idx,
-                                       int chip_id, int target_cell_id)
+    int      lw_glue_cell_distance      (LwState *state, int cell_a, int cell_b)
+    int      lw_glue_cell_distance2     (LwState *state, int cell_a, int cell_b)
 
 
 # Generator AI dispatch hook
@@ -317,6 +320,24 @@ cdef extern from "lw_generator.h":
     void lw_generator_set_ai_dispatch(LwGenerator *self,
                                       lw_fight_ai_dispatch_t fn,
                                       void *userdata)
+
+
+cdef extern from "lw_bulb_template.h":
+    int LW_BULB_TEMPLATE_MAX_CHIPS
+    ctypedef struct LwBulbTemplate:
+        pass
+    void lw_bulb_template_init(LwBulbTemplate *self, int id, const char *name,
+                                int min_life, int max_life,
+                                int min_strength, int max_strength,
+                                int min_wisdom, int max_wisdom,
+                                int min_agility, int max_agility,
+                                int min_resistance, int max_resistance,
+                                int min_science, int max_science,
+                                int min_magic, int max_magic,
+                                int min_tp, int max_tp,
+                                int min_mp, int max_mp)
+    void lw_bulb_template_add_chip(LwBulbTemplate *self, LwChip *chip)
+    void lw_bulbs_add_invocation_template(LwBulbTemplate *invocation)
 
 
 # ===================== Python-side wrappers ======================
@@ -506,6 +527,37 @@ cdef class Engine:
                 e.chips[i] = chips[i]
         lw_scenario_add_entity(&self.scenario, team, &e)
 
+    def add_summon_template(self, int id, str name,
+                             tuple life, tuple strength, tuple wisdom,
+                             tuple agility, tuple resistance, tuple science,
+                             tuple magic, tuple tp, tuple mp,
+                             list chip_ids):
+        """Register a Bulb (summon) template. life=(min,max) etc.
+        chip_ids = list of chip ids the bulb knows (must already be
+        registered via add_chip).
+        """
+        cdef LwBulbTemplate *t = <LwBulbTemplate*>calloc(1, 4096)  # generous
+        if t == NULL:
+            raise MemoryError("template alloc")
+        cdef bytes nb = name.encode('utf-8')
+        lw_bulb_template_init(t, id, nb,
+                               int(life[0]), int(life[1]),
+                               int(strength[0]), int(strength[1]),
+                               int(wisdom[0]), int(wisdom[1]),
+                               int(agility[0]), int(agility[1]),
+                               int(resistance[0]), int(resistance[1]),
+                               int(science[0]), int(science[1]),
+                               int(magic[0]), int(magic[1]),
+                               int(tp[0]), int(tp[1]),
+                               int(mp[0]), int(mp[1]))
+        cdef int cid
+        cdef LwChip *c
+        for cid in chip_ids:
+            c = lw_chips_get_chip(cid)
+            if c != NULL:
+                lw_bulb_template_add_chip(t, c)
+        lw_bulbs_add_invocation_template(t)
+
     def set_seed(self, int seed):
         self.scenario.seed = seed
 
@@ -600,12 +652,23 @@ cdef class Engine:
         return lw_glue_move_toward_cell(&self.state, entity_idx,
                                           target_cell, max_mp)
 
+    def cell_distance(self, int cell_a, int cell_b):
+        """Manhattan distance between two cell ids (Pathfinding.getCaseDistance)."""
+        return lw_glue_cell_distance(&self.state, cell_a, cell_b)
+
+    def cell_distance2(self, int cell_a, int cell_b):
+        """Squared Euclidean distance between two cell ids
+        (Map.getDistance2 -- used by fight_class.getNearestEnemy)."""
+        return lw_glue_cell_distance2(&self.state, cell_a, cell_b)
+
     def use_chip(self, int entity_idx, int chip_id, int target_cell):
         """Apply a USE_CHIP action. Returns Attack.USE_* result code (same
         codes as fire_weapon). The chip must have been registered first
         via add_chip(...) AND attached to the entity via add_entity(chips=[...]).
+        Summon-typed chips dispatch through Fight.summonEntity which sets
+        up the bulb's AI / birthTurn / etc; other chips go through state.useChip.
         """
-        return lw_glue_apply_use_chip(&self.state, entity_idx,
+        return lw_glue_apply_use_chip(&self.state, &self.fight, entity_idx,
                                        chip_id, target_cell)
 
     # ---- read action stream ----

@@ -199,7 +199,7 @@ void lw_map_generate_map_impl(LwMap *out_map,
  *
  * `entity_idx` is the index into state->entities[] (Java holds the
  * Entity reference itself; we hold its array slot). */
-void lw_map_set_entity(LwMap *self, int entity_idx, LwCell *cell);
+void lw_map_set_entity(LwMap *self, struct LwEntity *entity, LwCell *cell);
 
 /* public void moveEntity(Entity entity, Cell cell) */
 int lw_map_move_entity(LwMap *self, struct LwEntity *entity, LwCell *cell);

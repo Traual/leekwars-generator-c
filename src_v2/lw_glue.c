@@ -127,13 +127,30 @@ LwEffect* lw_state_alloc_effect(struct LwState *state) {
 /* Bulb create wrapper (State agent wanted this, BulbTemplate has   */
 /* its own createInvocation -- they're the same thing).             */
 
-extern LwEntity* lw_bulb_template_create_invocation(
-    int template_id, int level, struct LwEntity *owner,
-    struct LwCell *cell);
+/* Java: Bulb.create(owner, id, type, level, critical, name) -- type is
+ * the template id from the SUMMON effect's value1. We look up the
+ * template in the Bulbs registry and call the per-template factory. */
+extern int lw_bulb_template_create_invocation(const struct LwBulbTemplate *self,
+                                               struct LwEntity *out_entity,
+                                               struct LwEntity *owner, int id,
+                                               int level, int critical);
+extern struct LwBulbTemplate* lw_bulbs_get_invocation_template(int id);
 
-LwEntity* lw_bulb_create(int template_id, int level,
-                         struct LwEntity *owner, struct LwCell *cell) {
-    return lw_bulb_template_create_invocation(template_id, level, owner, cell);
+LwEntity* lw_bulb_create(struct LwEntity *owner, int id, int type, int level,
+                         int critical, const char *name) {
+    (void)name;
+    struct LwBulbTemplate *t = lw_bulbs_get_invocation_template(type);
+    if (t == NULL) return NULL;
+    LwEntity *e = (LwEntity*) calloc(1, sizeof(LwEntity));
+    if (e == NULL) return NULL;
+    lw_entity_init_default(e);
+    e->type = LW_ENTITY_TYPE_BULB;
+    int rc = lw_bulb_template_create_invocation(t, e, owner, id, level, critical);
+    if (rc == 0) {
+        free(e);
+        return NULL;
+    }
+    return e;
 }
 
 
@@ -159,6 +176,8 @@ void lw_state_statistics_entity_turn(struct LwState *s, struct LwEntity *e)
                                   { (void)s; (void)e; }
 void lw_state_statistics_antidote (struct LwState *s, struct LwEntity *e)
                                   { (void)s; (void)e; }
+
+/* lw_stats_summon, lw_stats_use_chip, lw_stats_move all defined in lw_statistics.c. */
 
 
 /* ---------------------------------------------------------------- */
@@ -491,6 +510,29 @@ int lw_glue_move_toward_cell(struct LwState *state, int entity_idx,
 }
 
 
+/* Manhattan distance (Pathfinding.getCaseDistance). */
+extern int lw_pathfinding_get_case_distance(const struct LwCell *c1, const struct LwCell *c2);
+/* Squared Euclidean distance (Map.getDistance2) -- used by
+ * fight_class.getNearestEnemy / getFarestEnemy. */
+extern int lw_map_get_distance2(const struct LwCell *c1, const struct LwCell *c2);
+
+int lw_glue_cell_distance(struct LwState *state, int cell_a, int cell_b) {
+    if (state == NULL || state->map == NULL) return -1;
+    LwCell *ca = lw_map_get_cell(state->map, cell_a);
+    LwCell *cb = lw_map_get_cell(state->map, cell_b);
+    if (ca == NULL || cb == NULL) return -1;
+    return lw_pathfinding_get_case_distance(ca, cb);
+}
+
+int lw_glue_cell_distance2(struct LwState *state, int cell_a, int cell_b) {
+    if (state == NULL || state->map == NULL) return -1;
+    LwCell *ca = lw_map_get_cell(state->map, cell_a);
+    LwCell *cb = lw_map_get_cell(state->map, cell_b);
+    if (ca == NULL || cb == NULL) return -1;
+    return lw_map_get_distance2(ca, cb);
+}
+
+
 /* High-level apply_use_weapon: take entity by state index + cell id,
  * resolve to LwEntity* + LwCell*, call lw_state_use_weapon. Returns the
  * Attack.USE_* result code. */
@@ -531,9 +573,12 @@ int lw_glue_apply_use_weapon(struct LwState *state, int entity_idx,
  * to lw_state_use_chip. */
 extern int lw_state_use_chip(struct LwState *self, struct LwEntity *caster,
                              struct LwCell *target, struct LwChip *template_);
+extern int lw_fight_summon_entity(struct LwFight *self, struct LwEntity *caster,
+                                   struct LwCell *target, struct LwChip *template_,
+                                   void *value);
 
-int lw_glue_apply_use_chip(struct LwState *state, int entity_idx,
-                            int chip_id, int target_cell_id) {
+int lw_glue_apply_use_chip(struct LwState *state, struct LwFight *fight,
+                            int entity_idx, int chip_id, int target_cell_id) {
     if (state == NULL) return -100;
     if (entity_idx < 0 || entity_idx >= state->n_entities) return -101;
     LwEntity *caster = state->m_entities[entity_idx];
@@ -546,6 +591,15 @@ int lw_glue_apply_use_chip(struct LwState *state, int entity_idx,
     struct LwChip *chip = lw_chips_get_chip(chip_id);
     if (chip == NULL) return -105;
 
+    /* Mirror Java's Fight.useChip: summon-typed chips dispatch through
+     * Fight.summonEntity (which sets up the bulb's AI / birthTurn / etc).
+     * Other chips go through state.useChip directly. */
+    struct LwAttack *attack = lw_chip_get_attack(chip);
+    const LwEffectParameters *summon_params =
+        lw_attack_get_effect_parameters_by_type(attack, LW_EFFECT_TYPE_SUMMON);
+    if (summon_params != NULL && fight != NULL) {
+        return lw_fight_summon_entity(fight, caster, target, chip, NULL);
+    }
     return lw_state_use_chip(state, caster, target, chip);
 }
 
