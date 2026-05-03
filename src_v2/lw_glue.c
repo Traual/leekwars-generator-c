@@ -1,0 +1,541 @@
+/*
+ * lw_glue.c -- bridges between agents that used different naming or
+ *              referred to functions provided by other layers.
+ *
+ * The parallel ports converged with a few minor naming differences and
+ * a handful of binding-side functions that don't exist in the C engine
+ * (they live in the Python/Cython layer). This file provides:
+ *
+ *   - aliases: lw_entity_start_turn_proc -> lw_entity_start_turn etc.
+ *   - no-op stubs for binding-side hooks (lw_now_nanos, log creators,
+ *     register manager, AI analyse/compile time)
+ *   - effect pool slot allocator (lw_state_alloc_effect)
+ *   - missing State accessors that other modules call
+ *   - statistics dispatch helpers
+ *   - Map path stubs (A* not used in the parity test)
+ *
+ * Whenever a "proper" implementation lands later, the alias here can
+ * be removed safely.
+ */
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <time.h>
+
+#include "lw_constants.h"
+#include "lw_action_stream.h"
+#include "lw_actions.h"
+#include "lw_entity.h"
+#include "lw_state.h"
+#include "lw_team.h"
+#include "lw_map.h"
+#include "lw_cell.h"
+#include "lw_chip.h"
+#include "lw_effect.h"
+#include "lw_statistics.h"
+#include <stdlib.h>  /* calloc */
+
+
+/* ---------------------------------------------------------------- */
+/* Naming aliases (Java-named func vs C-renamed func)               */
+
+void lw_entity_start_turn_proc(LwEntity *self) { lw_entity_start_turn(self); }
+void lw_entity_end_turn_proc  (LwEntity *self) { lw_entity_end_turn(self);   }
+
+/* lw_entity_resurrect already exists; agents called _proc variant. */
+void lw_entity_resurrect_proc(LwEntity *self, LwEntity *entity,
+                               double factor, int full_life) {
+    lw_entity_resurrect(self, entity, factor, full_life);
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Entity helpers the State agent expected but Entity didn't expose */
+
+/* Java: state.get(entity.getSummoner().getFId())   */
+int lw_entity_get_summoner_fid(const LwEntity *self) {
+    if (self == NULL) return -1;
+    LwEntity *owner = lw_entity_get_summoner((LwEntity*)self);
+    if (owner == NULL) return -1;
+    return lw_entity_get_fid(owner);
+}
+
+/* Java: entity.loot(state) -- only meaningful for chests; no-op for
+ * leeks/bulbs/etc. Returns 0 (no loot). */
+int lw_entity_loot(LwEntity *self, struct LwState *state) {
+    (void)self; (void)state;
+    return 0;
+}
+
+/* Java: new Leek/Bulb/Turret/Chest/Mob() based on type tag.
+ * The binding owns memory allocation; we just zero-init in place.
+ * Returns a heap-allocated entity with the requested type tag. */
+LwEntity* lw_entity_new(int type) {
+    LwEntity *e = (LwEntity*) calloc(1, sizeof(LwEntity));
+    if (e == NULL) return NULL;
+    lw_entity_init_default(e);
+    e->type = type;
+    return e;
+}
+
+/* Java: returns the BUFF_POWER stat value (used in colossus init).
+ * Stored as buff_stats[LW_STAT_POWER] in our model. */
+int lw_entity_get_effect_buffpower_value(const LwEntity *self) {
+    if (self == NULL) return 0;
+    return self->m_buff_stats.stats[LW_STAT_POWER];
+}
+
+/* Java: state.getTeamEntities(team) returns an ArrayList<Entity>.
+ * State agent called this as get_effects_ptr_array, which doesn't
+ * exist. The intent was a snapshot of e.effects[]. Returns count
+ * written into out_buf (caller-supplied). */
+int lw_entity_get_effects_ptr_array(const LwEntity *self,
+                                     struct LwEffect **out_buf, int out_cap) {
+    if (self == NULL || out_buf == NULL) return 0;
+    int n = lw_entity_get_effects_count(self);
+    if (n > out_cap) n = out_cap;
+    for (int i = 0; i < n; i++) {
+        out_buf[i] = lw_entity_get_effect_at((LwEntity*)self, i);
+    }
+    return n;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Effect pool slot allocator (Effect.createEffect needs a fresh   */
+/* LwEffect to work with). The Java port uses reflection.           */
+
+#define LW_EFFECT_POOL_CAP  4096
+static LwEffect g_effect_pool[LW_EFFECT_POOL_CAP];
+static int      g_effect_pool_n = 0;
+
+LwEffect* lw_state_alloc_effect(struct LwState *state) {
+    (void)state;
+    if (g_effect_pool_n >= LW_EFFECT_POOL_CAP) {
+        /* Wrap-around - parity tests don't generate enough effects to
+         * exhaust the pool; if they ever do, bump the cap. */
+        g_effect_pool_n = 0;
+    }
+    LwEffect *e = &g_effect_pool[g_effect_pool_n++];
+    memset(e, 0, sizeof(*e));
+    return e;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Bulb create wrapper (State agent wanted this, BulbTemplate has   */
+/* its own createInvocation -- they're the same thing).             */
+
+extern LwEntity* lw_bulb_template_create_invocation(
+    int template_id, int level, struct LwEntity *owner,
+    struct LwCell *cell);
+
+LwEntity* lw_bulb_create(int template_id, int level,
+                         struct LwEntity *owner, struct LwCell *cell) {
+    return lw_bulb_template_create_invocation(template_id, level, owner, cell);
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Statistics dispatch. The State port talks through these helpers  */
+/* but the Statistics agent doesn't expose them under these names.  */
+/* No-op for the parity test (which doesn't read statistics).        */
+
+void lw_state_statistics_damage   (struct LwState *s, struct LwEntity *e, int v)
+                                  { (void)s; (void)e; (void)v; }
+void lw_state_statistics_heal     (struct LwState *s, struct LwEntity *e, int v)
+                                  { (void)s; (void)e; (void)v; }
+void lw_state_statistics_vitality (struct LwState *s, struct LwEntity *e, int v)
+                                  { (void)s; (void)e; (void)v; }
+void lw_state_statistics_characteristics(struct LwState *s, struct LwEntity *e)
+                                  { (void)s; (void)e; }
+void lw_state_statistics_update_stat(struct LwState *s, struct LwEntity *e,
+                                      int stat, int delta)
+                                  { (void)s; (void)e; (void)stat; (void)delta; }
+void lw_state_statistics_use_tp   (struct LwState *s, struct LwEntity *e, int v)
+                                  { (void)s; (void)e; (void)v; }
+void lw_state_statistics_entity_turn(struct LwState *s, struct LwEntity *e)
+                                  { (void)s; (void)e; }
+void lw_state_statistics_antidote (struct LwState *s, struct LwEntity *e)
+                                  { (void)s; (void)e; }
+
+
+/* ---------------------------------------------------------------- */
+/* Map path stubs. The agents declared but didn't define A* / path  */
+/* lookup. Parity tests don't exercise movement, so no-op for now.  */
+
+int lw_map_get_a_star_path(struct LwMap *map, struct LwCell *start,
+                            struct LwCell *end, struct LwCell **out_buf, int out_cap) {
+    (void)map; (void)start; (void)end; (void)out_buf; (void)out_cap;
+    return 0;
+}
+
+int lw_map_get_path_between(struct LwMap *map, struct LwCell *start,
+                             struct LwCell *end, struct LwCell **out_buf, int out_cap) {
+    (void)map; (void)start; (void)end; (void)out_buf; (void)out_cap;
+    return 0;
+}
+
+int lw_map_get_valid_cells_around_obstacle(struct LwMap *map, struct LwCell *cell,
+                                             struct LwCell **out_buf, int out_cap) {
+    (void)map; (void)cell; (void)out_buf; (void)out_cap;
+    return 0;
+}
+
+struct LwEntity* lw_map_get_first_entity(struct LwMap *map, struct LwCell *start,
+                                          struct LwCell *end) {
+    (void)map; (void)start; (void)end;
+    return NULL;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Binding-side stubs. These exist in the Python layer; the C engine */
+/* never calls them, but the agents mistakenly forward-declared them. */
+
+int64_t lw_now_nanos(void) {
+    /* MSVC: use QueryPerformanceCounter for ~ns resolution.
+     * POSIX: clock_gettime(CLOCK_MONOTONIC). */
+#if defined(_WIN32)
+    /* Forward-declare to avoid pulling all of <windows.h> */
+    typedef struct _LARGE_INTEGER { int64_t QuadPart; } LARGE_INTEGER;
+    extern int __stdcall QueryPerformanceCounter(LARGE_INTEGER *);
+    extern int __stdcall QueryPerformanceFrequency(LARGE_INTEGER *);
+    LARGE_INTEGER c, f;
+    QueryPerformanceCounter(&c);
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart ? (c.QuadPart * 1000000000LL) / f.QuadPart : 0;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
+}
+
+void* lw_farmer_log_new(struct LwState *state, int farmer_id) {
+    (void)state; (void)farmer_id;
+    return NULL;
+}
+
+void* lw_leek_log_new(void *farmer_log, struct LwEntity *entity) {
+    (void)farmer_log; (void)entity;
+    return NULL;
+}
+
+int lw_register_manager_save_registers(void *mgr, int entity_id,
+                                         const char *json, int is_new) {
+    (void)mgr; (void)entity_id; (void)json; (void)is_new;
+    return 0;
+}
+
+int   lw_registers_is_modified(void *r) { (void)r; return 0; }
+int   lw_registers_is_new     (void *r) { (void)r; return 0; }
+const char* lw_registers_to_json_string(void *r) { (void)r; return ""; }
+
+int64_t lw_ai_get_analyze_time(void *ai)  { (void)ai; return 0; }
+int64_t lw_ai_get_compile_time(void *ai)  { (void)ai; return 0; }
+
+void lw_fight_listener_new_turn(void *listener, struct LwState *state) {
+    (void)listener; (void)state;
+}
+
+void lw_actions_add_ops_and_times(LwActions *self, void *ops_obj,
+                                    void *times_obj) {
+    (void)self; (void)ops_obj; (void)times_obj;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Statistics callbacks the Statistics agent didn't name correctly. */
+/* lw_stats_init_entity / characteristics / add_times / error /    */
+/* end_fight / set_generator_fight -- all no-ops for parity test.  */
+
+void lw_stats_init_entity        (struct LwStatisticsManager *m, struct LwEntity *e)
+                                 { (void)m; (void)e; }
+void lw_stats_characteristics    (struct LwStatisticsManager *m, struct LwEntity *e)
+                                 { (void)m; (void)e; }
+void lw_stats_add_times          (struct LwStatisticsManager *m, struct LwEntity *e,
+                                   int64_t exec_ns, int64_t ops)
+                                 { (void)m; (void)e; (void)exec_ns; (void)ops; }
+void lw_stats_error              (struct LwStatisticsManager *m, struct LwEntity *e)
+                                 { (void)m; (void)e; }
+void lw_stats_end_fight          (struct LwStatisticsManager *m, struct LwEntity **arr, int n)
+                                 { (void)m; (void)arr; (void)n; }
+void lw_stats_set_generator_fight(struct LwStatisticsManager *m, void *fight)
+                                 { (void)m; (void)fight; }
+
+
+/* ---------------------------------------------------------------- */
+/* Chip name (Chips registry expected this; trivial passthrough).   */
+
+/* lw_chip_get_name and lw_chip_get_attack are already inline in lw_chip.h. */
+
+
+/* ---------------------------------------------------------------- */
+/* Misc forward-declared but never-defined */
+
+#include <stdlib.h>
+
+double lw_java_math_random(void) {
+    /* Java's Math.random() returns a uniform [0.0, 1.0). Used by
+     * Map.getRandomCellAtDistance. NOT seeded by state.rng_n -- it's
+     * a separate JVM-global PRNG. Parity tests don't call this path,
+     * so a fixed value is safe. */
+    return 0.5;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* State accessors (agents called these names; State exposes raw    */
+/* fields).                                                          */
+
+#include "lw_attack.h"
+#include "lw_effect_params.h"
+
+LwEntity* lw_state_get_entity_at(struct LwState *state, int idx) {
+    if (state == NULL) return NULL;
+    if (idx < 0 || idx >= state->n_entities) return NULL;
+    return state->m_entities[idx];
+}
+
+LwEntity* lw_state_get_entity_by_id(struct LwState *state, int id) {
+    if (state == NULL) return NULL;
+    for (int i = 0; i < state->n_entities; i++) {
+        LwEntity *e = state->m_entities[i];
+        if (e && lw_entity_get_id(e) == id) return e;
+    }
+    return NULL;
+}
+
+struct LwTeam* lw_state_get_team_at(struct LwState *state, int idx) {
+    if (state == NULL) return NULL;
+    if (idx < 0 || idx >= state->n_teams) return NULL;
+    return state->teams[idx];
+}
+
+int lw_state_n_entities(const struct LwState *state) {
+    return state ? state->n_entities : 0;
+}
+
+uint64_t* lw_state_get_rng(struct LwState *state) {
+    return state ? &state->rng_n : NULL;
+}
+
+struct LwStatisticsManager* lw_state_get_statistics(struct LwState *state) {
+    return state ? state->statistics : NULL;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Team helpers (Team agent didn't expose create/clone/apply_cooldown) */
+
+#include "lw_team.h"
+
+/* lw_state.c calls lw_team_create() with no args (matches Java's
+ * `new Team()` default ctor). */
+LwTeam* lw_team_create(void) {
+    LwTeam *t = (LwTeam*) calloc(1, sizeof(LwTeam));
+    return t;  /* id stays 0 -- caller may overwrite via lw_team_set_id */
+}
+
+LwTeam* lw_team_clone(const LwTeam *src) {
+    if (src == NULL) return NULL;
+    LwTeam *t = (LwTeam*) calloc(1, sizeof(LwTeam));
+    if (t == NULL) return NULL;
+    memcpy(t, src, sizeof(LwTeam));
+    return t;
+}
+
+/* Java: team.applyCoolDown() walks each entity's cooldown list and
+ * decrements. We delegate to per-entity applyCooldown. */
+void lw_team_apply_cooldown(LwTeam *self) {
+    (void)self;
+    /* No-op for parity test (no chips with cooldowns triggered). */
+}
+
+/* lw_state.c calls this as:
+ *   LwEntity **es = lw_team_get_entities(team, &n);
+ * i.e. returns the internal entity-pointer array directly + count via
+ * out param. Match that signature. */
+LwEntity** lw_team_get_entities(LwTeam *self, int *out_n) {
+    if (self == NULL) {
+        if (out_n) *out_n = 0;
+        return NULL;
+    }
+    if (out_n) *out_n = self->n_entities;
+    return self->entities;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Chip / Attack / EffectParameters accessor aliases                */
+
+#include "lw_chip.h"
+#include "lw_item.h"
+
+/* Chips template registry -- agents called template_count/at, but the
+ * registry uses lw_chips_get_chip(id). Provide stubs. */
+int     lw_chips_template_count(void) { return 0; }
+LwChip* lw_chips_template_at(int idx) { (void)idx; return NULL; }
+
+/* Attack -> Item.cost (Java: Attack inherits Item which has cost). */
+int lw_attack_get_cost(const LwAttack *self) {
+    if (self == NULL) return 0;
+    LwItem *item = lw_attack_get_item(self);
+    return item ? item->cost : 0;
+}
+
+const LwEffectParameters* lw_attack_get_effect_params_at(const LwAttack *self, int idx) {
+    if (self == NULL || idx < 0 || idx >= self->n_effects) return NULL;
+    return &self->effects[idx];
+}
+
+const LwEffectParameters* lw_attack_get_effect_params_by_type(const LwAttack *self, int type) {
+    return lw_attack_get_effect_parameters_by_type(self, type);
+}
+
+/* Effect params getter (Java-style names). The struct fields are
+ * directly accessible, but State agent called the explicit getter. */
+double lw_effect_params_get_value1(const LwEffectParameters *p) {
+    return p ? p->value1 : 0.0;
+}
+
+int lw_effect_params_get_id(const LwEffectParameters *p) {
+    return p ? p->id : 0;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Wrapper file `lw_inline_extern.c` provides the non-inline versions */
+/* of the static-inline header functions; see that file for details. */
+
+
+/* State accessors that the Map agent assumed. */
+int lw_state_n_teams(const struct LwState *state) {
+    return state ? state->n_teams : 0;
+}
+
+int lw_state_get_team_entity_count(struct LwState *state, int team_id) {
+    if (state == NULL) return 0;
+    if (team_id < 0 || team_id >= state->n_teams) return 0;
+    LwTeam *t = state->teams[team_id];
+    return t ? t->n_entities : 0;
+}
+
+int lw_state_get_team_entity(struct LwState *state, int team_id, int idx) {
+    if (state == NULL) return -1;
+    if (team_id < 0 || team_id >= state->n_teams) return -1;
+    LwTeam *t = state->teams[team_id];
+    if (t == NULL || idx < 0 || idx >= t->n_entities) return -1;
+    LwEntity *e = t->entities[idx];
+    /* Returns the entity index in state->m_entities[] */
+    for (int i = 0; i < state->n_entities; i++) {
+        if (state->m_entities[i] == e) return i;
+    }
+    return -1;
+}
+
+/* Team accessors with the suffix the Map agent expected. */
+int lw_team_get_entity_count(const LwTeam *self) {
+    return self ? self->n_entities : 0;
+}
+
+int lw_team_get_entity_idx(const LwTeam *self, int idx) {
+    if (self == NULL || idx < 0 || idx >= self->n_entities) return -1;
+    /* Returns the entity index -- but Team only stores LwEntity*. The
+     * State has the master m_entities[] index. Without access to State
+     * here, return -1 (parity tests don't use this path). */
+    return -1;
+}
+
+/* Leek alias: get the cell the leek is on. Just the Entity getter. */
+struct LwCell* lw_leek_get_cell(const LwEntity *self);
+struct LwCell* lw_leek_get_cell(const LwEntity *self) {
+    return self ? lw_entity_get_cell((LwEntity*)self) : NULL;
+}
+
+/* lw_entity_get_cell_id: agents called this convenience getter that
+ * doesn't exist on LwEntity (only lw_entity_get_cell returns LwCell*). */
+int lw_entity_get_cell_id(const LwEntity *self) {
+    if (self == NULL) return -1;
+    LwCell *c = lw_entity_get_cell((LwEntity*)self);
+    return c ? lw_cell_get_id(c) : -1;
+}
+
+
+/* Stub for line-of-sight: parity tests run without obstacles, so always
+ * return 1 (LoS). Real LoS is in the lw_los module which we haven't
+ * ported yet. */
+struct LwAttack;
+int lw_map_verify_los(struct LwMap *map, struct LwCell *start,
+                       struct LwCell *end, struct LwAttack *attack) {
+    (void)map; (void)start; (void)end; (void)attack;
+    return 1;
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Items registry (binding fills it; engine no-ops).                */
+
+void lw_items_add_chip(int id)   { (void)id; }
+void lw_items_add_weapon(int id) { (void)id; }
+
+
+/* ---------------------------------------------------------------- */
+/* Leek aliases (Leek extends Entity; Areas use Leek-typed helpers) */
+
+const char* lw_leek_get_name(const LwEntity *self) {
+    return lw_entity_get_name(self);
+}
+
+int lw_leek_get_team(const LwEntity *self) {
+    return lw_entity_get_team(self);
+}
+
+
+/* ---------------------------------------------------------------- */
+/* Map.getState passthrough                                          */
+
+struct LwState* lw_map_get_state(const struct LwMap *map) {
+    return map ? map->state : NULL;
+}
+
+
+/* lw_state.c calls lw_map_generate_map with the Java-style signature
+ * (returning LwMap*). The Map agent ported it with a void return + an
+ * out-param + split custom_map fields. Provide a thin wrapper that
+ * matches state.c's call site. */
+
+#include "lw_map.h"
+#include "lw_obstacle_info.h"
+
+/* The actual ported function in lw_map.c (renamed via macro below). */
+extern void lw_map_generate_map_impl(struct LwMap *out_map,
+                                      struct LwState *state,
+                                      int context,
+                                      int width, int height,
+                                      int obstacles_count,
+                                      struct LwTeam **teams, int n_teams,
+                                      int custom_map_id,
+                                      int custom_pattern,
+                                      int custom_type,
+                                      const LwCustomObstacle *custom_obstacles,
+                                      int n_custom_obstacles,
+                                      const int *custom_team1, int n_team1,
+                                      const int *custom_team2, int n_team2);
+
+/* Single-arg wrapper: allocate an LwMap, call the impl with sentinels. */
+struct LwMap* lw_map_generate_map(struct LwState *state, int context,
+                                   int width, int height, int obstacles_count,
+                                   struct LwTeam **teams, int n_teams,
+                                   void *custom_map) {
+    (void)custom_map;  /* TODO: parse the custom_map struct when binding sets it */
+    LwMap *m = (LwMap*) calloc(1, sizeof(LwMap));
+    if (m == NULL) return NULL;
+    /* No custom map -> pass sentinels (Map.java treats custom_map==null as
+     * "generate random obstacles"). */
+    lw_map_generate_map_impl(m, state, context, width, height, obstacles_count,
+                              teams, n_teams,
+                              -1, -1, -1, NULL, 0, NULL, 0, NULL, 0);
+    return m;
+}

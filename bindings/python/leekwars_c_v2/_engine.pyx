@@ -1,0 +1,429 @@
+# cython: language_level=3, boundscheck=False, wraparound=False
+"""
+leekwars_c_v2._engine -- Cython binding for the line-by-line Java port.
+
+Minimal API focused on parity testing:
+
+    eng = Engine()
+    eng.add_weapon(item_id=37, name='pistol', cost=3, min_range=1, max_range=7,
+                    launch_type=1, area_id=1, los=True, max_uses=-1,
+                    effects=[(1, 15.0, 5.0, 0, 31, 0)])  # (type, v1, v2, turns, targets, modifiers)
+    eng.add_farmer(1, 'A', 'fr')
+    eng.add_farmer(2, 'B', 'fr')
+    eng.add_team(1, 'T1')
+    eng.add_team(2, 'T2')
+    eng.add_entity(team=0, fid=1, name='A', cell=72, ..., weapons=[37])
+    eng.add_entity(team=1, fid=2, name='B', cell=144, ..., weapons=[37])
+    eng.set_seed(1)
+    eng.set_custom_map(obstacles={}, team1=[72], team2=[144])
+    eng.set_ai_dispatch(my_callback)   # called per-entity per-turn
+    outcome = eng.run()
+    stream = eng.stream_dump()         # list of dicts in Java JSON shape
+"""
+
+from libc.stdint cimport int64_t, uint64_t
+from libc.stdlib cimport malloc, free, calloc
+from libc.string cimport memset, strncpy
+
+
+# ===================== C declarations ============================
+
+cdef extern from "lw_constants.h":
+    int LW_ENTITY_TYPE_LEEK
+    int LW_FIGHT_TYPE_SOLO
+    int LW_CONTEXT_TEST
+
+
+cdef extern from "lw_action_stream.h":
+    int LW_LOG_MAX_ARGS
+    ctypedef struct LwActionLog:
+        int type
+        int v[8]
+        int n_args
+        int extra_offset
+        int extra_len
+
+    ctypedef struct LwActionStream:
+        int          enabled
+        int          n_entries
+        LwActionLog  entries[2048]
+        int          extra[8192]
+        int          n_extra
+        int          next_effect_log_id
+
+
+cdef extern from "lw_actions.h":
+    ctypedef struct LwActions:
+        LwActionStream stream
+
+    void lw_actions_init(LwActions *self)
+
+
+cdef extern from "lw_state.h":
+    ctypedef struct LwState:
+        uint64_t              rng_n
+        int                   n_teams
+        int                   n_entities
+        int                   m_state
+        LwActions             actions
+        int                   context
+        int                   type
+        int                   seed
+        int                   draw_check_life
+
+
+cdef extern from "lw_outcome.h":
+    int LW_OUTCOME_MAX_LOGS
+
+    ctypedef struct LwOutcomeLogEntry:
+        int     key
+        void   *value
+
+    ctypedef struct LwOutcome:
+        LwActions          fight
+        LwOutcomeLogEntry  logs[64]
+        int                n_logs
+        int                winner
+        int                duration
+        void              *statistics
+        int                exception_status
+        char               exception_message[512]
+        int64_t            analyze_time
+        int64_t            compilation_time
+        int64_t            execution_time
+
+    void lw_outcome_init(LwOutcome *self)
+
+
+cdef extern from "lw_fight.h":
+    ctypedef int (*lw_fight_ai_dispatch_t)(void *fight, void *entity, void *ai_file,
+                                            int turn, void *userdata)
+
+    ctypedef struct LwFight:
+        int                  m_winteam
+        void                *generator
+        int                  m_id
+        int                  m_boss
+        int                  m_start_farmer
+        int                  max_turns
+        int64_t              execution_time
+        void                *listener
+        LwState             *state
+        lw_fight_ai_dispatch_t ai_dispatch
+        void                *ai_dispatch_userdata
+
+
+cdef extern from "lw_entity_info.h":
+    int LW_NAME_MAX
+    int LW_AI_PATH_MAX
+    int LW_COUNTRY_MAX
+    int LW_FARMER_NAME_MAX
+    int LW_TEAM_NAME_MAX
+    int LW_COMP_NAME_MAX
+    int LW_ENTITY_INFO_MAX_WEAPONS
+    int LW_ENTITY_INFO_MAX_CHIPS
+
+    ctypedef struct LwFarmerInfo:
+        int  id
+        char name[64]
+        char country[16]
+
+    ctypedef struct LwTeamInfo:
+        int  id
+        char name[64]
+        char composition_name[64]
+        int  has_composition_name
+        int  level
+        char turret_ai_path[256]
+        int  turret_ai_owner
+
+    ctypedef struct LwEntityInfo:
+        int  id
+        char name[64]
+        char ai[256]
+        int  ai_folder
+        char ai_path[256]
+        int  ai_version
+        int  ai_strict
+        int  aiOwner
+        int  type
+        int  farmer
+        int  team
+        int  level
+        int  dead
+        int  life
+        int  tp
+        int  mp
+        int  strength
+        int  agility
+        int  frequency
+        int  wisdom
+        int  resistance
+        int  science
+        int  magic
+        int  cores
+        int  ram
+        int  chips[32]
+        int  n_chips
+        int  weapons[16]
+        int  n_weapons
+        int  cell
+        int  has_cell
+        int  skin
+        int  hat
+        int  metal
+        int  face
+        int  custom_class
+        int  orientation
+        void *ai_file
+
+    void lw_entity_info_init(LwEntityInfo *self)
+
+
+cdef extern from "lw_scenario.h":
+    int LW_SCENARIO_MAX_FARMERS
+    int LW_SCENARIO_MAX_TEAMS
+
+    ctypedef struct LwScenario:
+        int64_t       seed
+        int           max_turns
+        int           type
+        int           context
+        int           fight_id
+        int           boss
+        int           draw_check_life
+        # opaque internal arrays
+
+    void lw_scenario_init(LwScenario *self)
+    void lw_scenario_add_entity(LwScenario *self, int team_id, const LwEntityInfo *entity)
+    void lw_scenario_add_farmer(LwScenario *self, const LwFarmerInfo *farmer)
+    void lw_scenario_add_team  (LwScenario *self, const LwTeamInfo *team)
+
+
+cdef extern from "lw_generator.h":
+    ctypedef struct LwGenerator:
+        int use_leekscript_cache
+        lw_fight_ai_dispatch_t ai_dispatch
+        void                  *ai_dispatch_userdata
+
+    void lw_generator_init(LwGenerator *self)
+    void lw_generator_set_ai_dispatch(LwGenerator *self,
+                                      lw_fight_ai_dispatch_t fn,
+                                      void *userdata)
+    int  lw_generator_run_scenario(LwGenerator *self,
+                                   LwScenario *scenario,
+                                   void *listener,
+                                   void *register_manager,
+                                   void *statistics_manager,
+                                   LwState *state,
+                                   LwFight *fight,
+                                   LwOutcome *outcome)
+
+
+cdef extern from "lw_effect_params.h":
+    ctypedef struct LwEffectParameters:
+        int    id
+        double value1
+        double value2
+        int    turns
+        int    targets
+        int    modifiers
+
+
+cdef extern from "lw_attack.h":
+    ctypedef struct LwAttack:
+        pass
+
+
+cdef extern from "lw_weapon.h":
+    ctypedef struct LwWeapon:
+        pass
+
+    void lw_weapon_init(LwWeapon *self,
+                         int id, int cost, int min_range, int max_range,
+                         const LwEffectParameters *effects, int n_effects,
+                         int launch_type, int area_id, int los,
+                         int template_id, const char *name,
+                         const LwEffectParameters *passive_effects, int n_passives,
+                         int max_uses)
+    void      lw_weapons_add_weapon(LwWeapon *weapon)
+    LwWeapon *lw_weapons_get_weapon(int id)
+
+
+# ===================== Python-side wrappers ======================
+
+cdef class Engine:
+    """Top-level container for a single fight."""
+    cdef LwGenerator generator
+    cdef LwScenario  scenario
+    cdef LwOutcome   outcome
+    cdef LwState     state
+    cdef LwFight     fight
+    cdef object      _ai_callback     # Python callable
+    cdef list        _registered_weapons  # keep alive
+    cdef list        _registered_chips    # keep alive
+
+    def __cinit__(self):
+        lw_generator_init(&self.generator)
+        lw_scenario_init(&self.scenario)
+        lw_outcome_init(&self.outcome)
+        memset(&self.state, 0, sizeof(LwState))
+        memset(&self.fight, 0, sizeof(LwFight))
+        self._ai_callback = None
+        self._registered_weapons = []
+        self._registered_chips = []
+        # Sensible defaults
+        self.scenario.max_turns = 30
+        self.scenario.type = LW_FIGHT_TYPE_SOLO
+        self.scenario.context = LW_CONTEXT_TEST
+        self.scenario.seed = 1
+
+    # ---- bootstrap registries ----
+    def add_weapon(self, int item_id, str name, int cost,
+                   int min_range, int max_range, int launch_type,
+                   int area_id, bint los, int max_uses,
+                   list effects, list passive_effects=None):
+        """Register one weapon. effects = list of (type,v1,v2,turns,targets,modifiers)."""
+        cdef LwWeapon* w = <LwWeapon*>calloc(1, sizeof(LwWeapon))
+        cdef int n_eff = len(effects)
+        cdef int n_pas = 0 if passive_effects is None else len(passive_effects)
+        cdef LwEffectParameters* eff = <LwEffectParameters*>calloc(max(n_eff,1), sizeof(LwEffectParameters))
+        cdef LwEffectParameters* pas = <LwEffectParameters*>calloc(max(n_pas,1), sizeof(LwEffectParameters))
+        cdef bytes name_b = name.encode('utf-8')
+        cdef int i
+        cdef tuple e
+        for i in range(n_eff):
+            e = effects[i]
+            eff[i].id        = e[0]
+            eff[i].value1    = e[1]
+            eff[i].value2    = e[2]
+            eff[i].turns     = e[3]
+            eff[i].targets   = e[4]
+            eff[i].modifiers = e[5]
+        if passive_effects is not None:
+            for i in range(n_pas):
+                e = passive_effects[i]
+                pas[i].id        = e[0]
+                pas[i].value1    = e[1]
+                pas[i].value2    = e[2]
+                pas[i].turns     = e[3]
+                pas[i].targets   = e[4]
+                pas[i].modifiers = e[5]
+        lw_weapon_init(w, item_id, cost, min_range, max_range,
+                        eff, n_eff, launch_type, area_id, 1 if los else 0,
+                        0, name_b, pas, n_pas, max_uses)
+        lw_weapons_add_weapon(w)
+        self._registered_weapons.append((item_id, name))
+
+    # ---- scenario setup ----
+    def add_farmer(self, int id, str name, str country):
+        cdef LwFarmerInfo f
+        memset(&f, 0, sizeof(LwFarmerInfo))
+        f.id = id
+        cdef bytes nb = name.encode('utf-8')
+        cdef bytes cb = country.encode('utf-8')
+        strncpy(f.name, nb, 63)
+        strncpy(f.country, cb, 15)
+        lw_scenario_add_farmer(&self.scenario, &f)
+
+    def add_team(self, int id, str name):
+        cdef LwTeamInfo t
+        memset(&t, 0, sizeof(LwTeamInfo))
+        t.id = id
+        cdef bytes nb = name.encode('utf-8')
+        strncpy(t.name, nb, 63)
+        lw_scenario_add_team(&self.scenario, &t)
+
+    def add_entity(self, int team, int fid, str name, int level,
+                   int life, int tp, int mp, int strength, int agility,
+                   int frequency, int wisdom, int resistance, int science,
+                   int magic, int cores, int ram,
+                   int farmer, int team_id,
+                   list weapons, list chips=None,
+                   int cell=-1):
+        cdef LwEntityInfo e
+        lw_entity_info_init(&e)
+        e.id = fid
+        cdef bytes nb = name.encode('utf-8')
+        strncpy(e.name, nb, 63)
+        e.type = LW_ENTITY_TYPE_LEEK
+        e.farmer = farmer
+        e.team = team_id
+        e.level = level
+        e.life = life
+        e.tp = tp
+        e.mp = mp
+        e.strength = strength
+        e.agility = agility
+        e.frequency = frequency
+        e.wisdom = wisdom
+        e.resistance = resistance
+        e.science = science
+        e.magic = magic
+        e.cores = cores
+        e.ram = ram
+        if cell >= 0:
+            e.cell = cell
+            e.has_cell = 1
+        cdef int i
+        e.n_weapons = min(len(weapons), 16)
+        for i in range(e.n_weapons):
+            e.weapons[i] = weapons[i]
+        if chips is not None:
+            e.n_chips = min(len(chips), 32)
+            for i in range(e.n_chips):
+                e.chips[i] = chips[i]
+        lw_scenario_add_entity(&self.scenario, team, &e)
+
+    def set_seed(self, int seed):
+        self.scenario.seed = seed
+
+    def set_max_turns(self, int n):
+        self.scenario.max_turns = n
+
+    # ---- run ----
+    def run(self):
+        """Run the scenario; returns winner team id (or -1)."""
+        cdef int rc = lw_generator_run_scenario(
+            &self.generator, &self.scenario,
+            NULL, NULL, NULL,
+            &self.state, &self.fight, &self.outcome)
+        return rc
+
+    # ---- read action stream ----
+    def stream_dump(self):
+        """Return the action stream as a list of dicts."""
+        cdef list out = []
+        cdef int n = self.outcome.fight.stream.n_entries
+        cdef int i, j
+        cdef LwActionLog *e
+        for i in range(n):
+            e = &self.outcome.fight.stream.entries[i]
+            args = []
+            for j in range(e.n_args):
+                args.append(e.v[j])
+            d = {'type': e.type, 'args': args}
+            if e.extra_len > 0:
+                extra = []
+                for j in range(e.extra_len):
+                    extra.append(self.outcome.fight.stream.extra[e.extra_offset + j])
+                d['extra'] = extra
+            out.append(d)
+        return out
+
+    @property
+    def winner(self):
+        return self.outcome.winner
+
+    @property
+    def duration(self):
+        return self.outcome.duration
+
+    @property
+    def rng_state(self):
+        return self.state.rng_n
+
+
+def hello():
+    """Sanity check that the module imports."""
+    return 'leekwars_c_v2 ready'
