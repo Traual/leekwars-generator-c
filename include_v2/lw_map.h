@@ -418,4 +418,117 @@ int  lw_map_verify_los(LwMap *self,
 double lw_java_math_random(void);
 
 
+/* ---- Pathfinding (lw_pathfinding_astar.c) ----------------------- */
+
+/* Java: public static double getDistance(Cell c1, Cell c2)
+ *           = sqrt(getDistance2(c1, c2)) */
+double lw_map_get_distance(const LwCell *c1, const LwCell *c2);
+
+/* Java: public static int getDistance2(Cell c1, Cell c2)
+ *           = (dx*dx + dy*dy) */
+int    lw_map_get_distance2(const LwCell *c1, const LwCell *c2);
+
+/* Java: public int getDistance2(Cell c1, List<Cell> cells)
+ *           = min over cells of (dx*dx + dy*dy) */
+int    lw_map_get_distance2_to_list(const LwCell *c1,
+                                    LwCell *const *cells, int n_cells);
+
+/* Java: public boolean available(Cell c, List<Cell> cells_to_ignore) */
+int    lw_map_available_with_ignore(LwMap *self, LwCell *c,
+                                    LwCell *const *cells_to_ignore,
+                                    int n_cells_to_ignore);
+
+/* Java: public List<Cell> getAStarPath(Cell c1, List<Cell> endCells,
+ *                                       List<Cell> cells_to_ignore)
+ *
+ * Out-buf form. Returns:
+ *   - n>=0: number of cells written into out_buf (path length)
+ *   - -1   : no path found / invalid args
+ *
+ * `cells_to_ignore` may be NULL/0 (matches Java's null cells_to_ignore).
+ * `targets` enumerates endCells (Java's overloaded varargs).
+ */
+int    lw_map_get_a_star_path(LwMap *self,
+                              LwCell *from,
+                              LwCell **targets, int n_targets,
+                              LwCell **forbidden, int n_forbidden,
+                              LwCell **out_buf, int out_cap);
+
+/* Java: public List<Cell> getPathBeetween(Cell start, Cell end,
+ *                                          List<Cell> cells_to_ignore)
+ * (Java spelling: "Beetween" -- bug-compatible.)
+ *
+ * Out-buf form. Returns -1 if start/end is null or no path. */
+int    lw_map_get_path_between(LwMap *self,
+                               LwCell *start, LwCell *end,
+                               LwCell **out_buf, int out_cap);
+
+/* Java: public List<Cell> getValidCellsAroundObstacle(Cell cell)
+ *
+ * Out-buf form. Returns count written. */
+int    lw_map_get_valid_cells_around_obstacle(LwMap *self,
+                                              LwCell *cell,
+                                              LwCell **out_buf, int out_cap);
+
+/* Java: public Cell getFirstEntity(Cell from, Cell target,
+ *                                   int minRange, int maxRange)
+ * Returns the first cell with an entity along the line from -> target,
+ * within [minRange,maxRange]. NULL if none. */
+LwCell* lw_map_get_first_entity(LwMap *self,
+                                LwCell *from, LwCell *target,
+                                int min_range, int max_range);
+
+/* Java: public List<Cell> getPathTowardLine(Cell start, Cell linecell1,
+ *                                            Cell linecell2)
+ * Out-buf form. Returns count written, or -1 if no path. */
+int    lw_map_get_path_toward_line(LwMap *self,
+                                   LwCell *start,
+                                   LwCell *linecell1,
+                                   LwCell *linecell2,
+                                   LwCell **out_buf, int out_cap);
+
+/* Java: public List<Cell> getPathAwayFromLine(Cell start, Cell linecell1,
+ *                                              Cell linecell2, int max_distance)
+ * Out-buf form. Returns count written, or -1 if no path. */
+int    lw_map_get_path_away_from_line(LwMap *self,
+                                      LwCell *start,
+                                      LwCell *linecell1,
+                                      LwCell *linecell2,
+                                      int max_distance,
+                                      LwCell **out_buf, int out_cap);
+
+/* Java: public List<Cell> getPathAway(Cell start, List<Cell> bad_cells,
+ *                                      int max_distance)
+ * Out-buf form. Returns count written, or -1 if no path. */
+int    lw_map_get_path_away(LwMap *self,
+                            LwCell *start,
+                            LwCell **bad_cells, int n_bad_cells,
+                            int max_distance,
+                            LwCell **out_buf, int out_cap);
+
+/* Java: public List<Cell> getPathAwayMin(Map map, Cell start,
+ *                                         List<Cell> bad_cells, int max_distance)
+ * Same impl as getPathAway except passes `map` explicitly. */
+int    lw_map_get_path_away_min(LwMap *self,
+                                LwMap *map,
+                                LwCell *start,
+                                LwCell **bad_cells, int n_bad_cells,
+                                int max_distance,
+                                LwCell **out_buf, int out_cap);
+
+/* Java: public List<Cell> getPossibleCastCellsForTarget(Attack attack,
+ *                                                        Cell target,
+ *                                                        List<Cell> cells_to_ignore)
+ * Out-buf form. Returns count written. */
+int    lw_map_get_possible_cast_cells_for_target(LwMap *self,
+                                                 const struct LwAttack *attack,
+                                                 LwCell *target,
+                                                 LwCell **cells_to_ignore,
+                                                 int n_cells_to_ignore,
+                                                 LwCell **out_buf, int out_cap);
+
+/* lw_attack_get_launch_type is static inline in lw_attack.h; include
+ * that header from any caller that needs it. */
+
+
 #endif /* LW_MAP_H */

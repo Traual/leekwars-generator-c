@@ -31,6 +31,9 @@ from libc.string cimport memset, strncpy
 cdef extern from "lw_constants.h":
     int LW_ENTITY_TYPE_LEEK
     int LW_FIGHT_TYPE_SOLO
+    int LW_FIGHT_TYPE_FARMER
+    int LW_FIGHT_TYPE_TEAM
+    int LW_FIGHT_TYPE_BATTLE_ROYALE
     int LW_CONTEXT_TEST
 
 
@@ -266,6 +269,23 @@ cdef extern from "lw_weapon.h":
     LwWeapon *lw_weapons_get_weapon(int id)
 
 
+cdef extern from "lw_chip.h":
+    ctypedef struct LwChip:
+        pass
+
+    ctypedef int LwChipType
+
+    void lw_chip_init(LwChip *self,
+                       int id, int cost, int min_range, int max_range,
+                       const LwEffectParameters *effects, int n_effects,
+                       int launch_type, int area, int los,
+                       int cooldown, int team_cooldown, int initial_cooldown,
+                       int level, int template_, const char *name,
+                       LwChipType chip_type, int max_uses)
+    void    lw_chips_add_chip(LwChip *chip)
+    LwChip *lw_chips_get_chip(int id)
+
+
 cdef extern from "lw_entity.h":
     ctypedef struct LwEntity:
         pass
@@ -286,6 +306,8 @@ cdef extern:
     void     lw_glue_entity_mark_has_ai(LwEntity *e)
     int      lw_glue_apply_use_weapon(LwState *state, int entity_idx,
                                        int weapon_id, int target_cell_id)
+    int      lw_glue_apply_use_chip  (LwState *state, int entity_idx,
+                                       int chip_id, int target_cell_id)
 
 
 # Generator AI dispatch hook
@@ -390,6 +412,38 @@ cdef class Engine:
         lw_weapons_add_weapon(w)
         self._registered_weapons.append((item_id, name))
 
+    def add_chip(self, int item_id, str name, int cost,
+                 int min_range, int max_range, int launch_type,
+                 int area_id, bint los, int max_uses,
+                 int cooldown, int initial_cooldown, bint team_cooldown,
+                 int level, int chip_type,
+                 list effects, int template_id=0):
+        """Register one chip. effects = list of (type,v1,v2,turns,targets,modifiers).
+        chip_type matches LwChipType enum (NONE=0, DAMAGE=1, HEAL=2,
+        RETURN=3, PROTECTION=4, BOOST=5, POISON=6, SHACKLE=7, BULB=8,
+        TACTIC=9) -- this is the JSON field "type".
+        """
+        cdef LwChip* c = <LwChip*>calloc(1, sizeof(LwChip))
+        cdef int n_eff = len(effects)
+        cdef LwEffectParameters* eff = <LwEffectParameters*>calloc(max(n_eff,1), sizeof(LwEffectParameters))
+        cdef bytes name_b = name.encode('utf-8')
+        cdef int i
+        cdef tuple e
+        for i in range(n_eff):
+            e = effects[i]
+            eff[i].id        = e[0]
+            eff[i].value1    = e[1]
+            eff[i].value2    = e[2]
+            eff[i].turns     = e[3]
+            eff[i].targets   = e[4]
+            eff[i].modifiers = e[5]
+        lw_chip_init(c, item_id, cost, min_range, max_range,
+                      eff, n_eff, launch_type, area_id, 1 if los else 0,
+                      cooldown, 1 if team_cooldown else 0, initial_cooldown,
+                      level, template_id, name_b, chip_type, max_uses)
+        lw_chips_add_chip(c)
+        self._registered_chips.append((item_id, name))
+
     # ---- scenario setup ----
     def add_farmer(self, int id, str name, str country):
         cdef LwFarmerInfo f
@@ -455,6 +509,10 @@ cdef class Engine:
 
     def set_max_turns(self, int n):
         self.scenario.max_turns = n
+
+    def set_type(self, int t):
+        """Fight type: 0=SOLO, 1=FARMER, 2=TEAM, 3=BATTLE_ROYALE."""
+        self.scenario.type = t
 
     def set_custom_map(self, dict obstacles=None, list team1=None, list team2=None,
                         int map_id=0, int width=18, int height=18):
@@ -533,6 +591,14 @@ cdef class Engine:
         """
         return lw_glue_apply_use_weapon(&self.state, entity_idx,
                                          weapon_id, target_cell)
+
+    def use_chip(self, int entity_idx, int chip_id, int target_cell):
+        """Apply a USE_CHIP action. Returns Attack.USE_* result code (same
+        codes as fire_weapon). The chip must have been registered first
+        via add_chip(...) AND attached to the entity via add_entity(chips=[...]).
+        """
+        return lw_glue_apply_use_chip(&self.state, entity_idx,
+                                       chip_id, target_cell)
 
     # ---- read action stream ----
     def stream_dump(self):

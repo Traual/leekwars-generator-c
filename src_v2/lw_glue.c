@@ -162,32 +162,11 @@ void lw_state_statistics_antidote (struct LwState *s, struct LwEntity *e)
 
 
 /* ---------------------------------------------------------------- */
-/* Map path stubs. The agents declared but didn't define A* / path  */
-/* lookup. Parity tests don't exercise movement, so no-op for now.  */
-
-int lw_map_get_a_star_path(struct LwMap *map, struct LwCell *start,
-                            struct LwCell *end, struct LwCell **out_buf, int out_cap) {
-    (void)map; (void)start; (void)end; (void)out_buf; (void)out_cap;
-    return 0;
-}
-
-int lw_map_get_path_between(struct LwMap *map, struct LwCell *start,
-                             struct LwCell *end, struct LwCell **out_buf, int out_cap) {
-    (void)map; (void)start; (void)end; (void)out_buf; (void)out_cap;
-    return 0;
-}
-
-int lw_map_get_valid_cells_around_obstacle(struct LwMap *map, struct LwCell *cell,
-                                             struct LwCell **out_buf, int out_cap) {
-    (void)map; (void)cell; (void)out_buf; (void)out_cap;
-    return 0;
-}
-
-struct LwEntity* lw_map_get_first_entity(struct LwMap *map, struct LwCell *start,
-                                          struct LwCell *end) {
-    (void)map; (void)start; (void)end;
-    return NULL;
-}
+/* Map path: A* and friends now live in lw_pathfinding_astar.c -- a
+ * 1:1 port of Map.java's getAStarPath / getPathBeetween /
+ * getValidCellsAroundObstacle / getFirstEntity / getDistance(2) /
+ * getPathToward* / getPathAway* / getPossibleCastCellsForTarget.
+ * No stubs needed here. */
 
 
 /* ---------------------------------------------------------------- */
@@ -528,15 +507,37 @@ int lw_glue_apply_use_weapon(struct LwState *state, int entity_idx,
 }
 
 
-/* Stub for line-of-sight: parity tests run without obstacles, so always
- * return 1 (LoS). Real LoS is in the lw_los module which we haven't
- * ported yet. */
-struct LwAttack;
-int lw_map_verify_los(struct LwMap *map, struct LwCell *start,
-                       struct LwCell *end, struct LwAttack *attack) {
-    (void)map; (void)start; (void)end; (void)attack;
-    return 1;
+/* High-level apply_use_chip: take entity by state index + chip id +
+ * target cell id, resolve to LwEntity* + LwChip* + LwCell*, call
+ * lw_state_use_chip. Returns the Attack.USE_* result code.
+ *
+ * Mirrors lw_glue_apply_use_weapon. Unlike weapons, chips don't need a
+ * setWeapon equivalent -- the chip template is passed through directly
+ * to lw_state_use_chip. */
+extern int lw_state_use_chip(struct LwState *self, struct LwEntity *caster,
+                             struct LwCell *target, struct LwChip *template_);
+
+int lw_glue_apply_use_chip(struct LwState *state, int entity_idx,
+                            int chip_id, int target_cell_id) {
+    if (state == NULL) return -100;
+    if (entity_idx < 0 || entity_idx >= state->n_entities) return -101;
+    LwEntity *caster = state->m_entities[entity_idx];
+    if (caster == NULL) return -102;
+    LwMap *map = state->map;
+    if (map == NULL) return -103;
+    LwCell *target = lw_map_get_cell(map, target_cell_id);
+    if (target == NULL) return -104;
+
+    struct LwChip *chip = lw_chips_get_chip(chip_id);
+    if (chip == NULL) return -105;
+
+    return lw_state_use_chip(state, caster, target, chip);
 }
+
+
+/* lw_map_verify_los now lives in lw_los.c (1:1 port of Map.verifyLoS).
+ * The previous stub here always returned 1 (no LoS check); removing it
+ * lets the real implementation in src_v2/lw_los.c link instead. */
 
 
 /* ---------------------------------------------------------------- */
