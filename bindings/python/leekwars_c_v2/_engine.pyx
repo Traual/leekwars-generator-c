@@ -306,6 +306,8 @@ cdef extern:
     void     lw_glue_entity_mark_has_ai(LwEntity *e)
     int      lw_glue_apply_use_weapon(LwState *state, int entity_idx,
                                        int weapon_id, int target_cell_id)
+    int      lw_glue_move_toward_cell  (LwState *state, int entity_idx,
+                                          int target_cell_id, int max_mp)
     int      lw_glue_apply_use_chip  (LwState *state, int entity_idx,
                                        int chip_id, int target_cell_id)
 
@@ -591,6 +593,12 @@ cdef class Engine:
         """
         return lw_glue_apply_use_weapon(&self.state, entity_idx,
                                          weapon_id, target_cell)
+
+    def move_toward(self, int entity_idx, int target_cell, int max_mp=10):
+        """Move the entity toward target_cell using up to max_mp MP.
+        Returns the number of MP actually used (0 if no movement)."""
+        return lw_glue_move_toward_cell(&self.state, entity_idx,
+                                          target_cell, max_mp)
 
     def use_chip(self, int entity_idx, int chip_id, int target_cell):
         """Apply a USE_CHIP action. Returns Attack.USE_* result code (same

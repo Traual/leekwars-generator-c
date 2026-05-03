@@ -202,7 +202,7 @@ void lw_map_generate_map_impl(LwMap *out_map,
 void lw_map_set_entity(LwMap *self, int entity_idx, LwCell *cell);
 
 /* public void moveEntity(Entity entity, Cell cell) */
-void lw_map_move_entity(LwMap *self, int entity_idx, LwCell *cell);
+int lw_map_move_entity(LwMap *self, struct LwEntity *entity, LwCell *cell);
 
 /* public void removeEntity(Entity entity) */
 void lw_map_remove_entity(LwMap *self, int entity_idx);

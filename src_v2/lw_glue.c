@@ -476,6 +476,21 @@ void lw_glue_entity_mark_has_ai(LwEntity *e) {
     if (e != NULL) lw_entity_set_ai(e, (void*)(size_t)1);
 }
 
+/* High-level move_toward_cell wrapper for the binding. Returns the
+ * number of MP actually consumed. */
+extern int64_t lw_state_move_toward_cell(struct LwState *self, struct LwEntity *entity,
+                                          int64_t cell_id, int64_t pm_to_use);
+
+int lw_glue_move_toward_cell(struct LwState *state, int entity_idx,
+                              int target_cell_id, int max_mp) {
+    if (state == NULL) return 0;
+    if (entity_idx < 0 || entity_idx >= state->n_entities) return 0;
+    LwEntity *e = state->m_entities[entity_idx];
+    if (e == NULL) return 0;
+    return (int)lw_state_move_toward_cell(state, e, (int64_t)target_cell_id, (int64_t)max_mp);
+}
+
+
 /* High-level apply_use_weapon: take entity by state index + cell id,
  * resolve to LwEntity* + LwCell*, call lw_state_use_weapon. Returns the
  * Attack.USE_* result code. */

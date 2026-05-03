@@ -253,16 +253,17 @@ void lw_map_set_entity(LwMap *self, int entity_idx, LwCell *cell) {
  *     entity.setCell(cell);
  * }
  */
-void lw_map_move_entity(LwMap *self, int entity_idx, LwCell *cell) {
-    if (self->state == NULL || cell == NULL) return;
-    struct LwEntity *e = lw_state_get_entity(self->state, entity_idx);
-    if (e == NULL) return;
+int lw_map_move_entity(LwMap *self, struct LwEntity *e, LwCell *cell) {
+    if (self == NULL || e == NULL || cell == NULL) return 0;
     int old_cell_id = lw_entity_get_cell_id(e);
     if (old_cell_id >= 0 && old_cell_id < LW_MAP_MAX_CELLS) {
         self->entity_at_cell[old_cell_id] = -1;
     }
-    self->entity_at_cell[cell->id] = entity_idx;
+    /* Record the entity by its FID so map.entity_at_cell[]'s value
+     * matches the FID-keyed lw_state_get_entity used elsewhere. */
+    self->entity_at_cell[cell->id] = lw_entity_get_fid(e);
     lw_entity_set_cell(e, cell);
+    return 1;
 }
 
 
