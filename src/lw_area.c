@@ -1,285 +1,575 @@
 /*
- * lw_area.c -- area-of-effect cell enumeration.
+ * lw_area.c -- 1:1 port of area/Area.java + all 16 subclasses + the
+ * MaskAreaCell mask generators they depend on.
  *
- * Each mask is a list of (dx, dy) offsets relative to the target
- * cell. The lists are precomputed once via lazy initialization
- * (matching Python's class-level _area attribute behavior).
+ * Each Java AreaXxx.getArea() becomes a static lw_area_xxx_get_area()
+ * function below. Dispatch happens in lw_area_get_area().
  *
- * Order is significant -- it's preserved through the action stream
- * and affects which entity dies first when multiple are at threshold
- * HP under a multi-target AoE.
+ * Reference:
+ *   java_reference/src/main/java/com/leekwars/generator/area/Area.java
+ *   java_reference/src/main/java/com/leekwars/generator/area/Area*.java
+ *   java_reference/src/main/java/com/leekwars/generator/area/MaskArea.java
+ *   java_reference/src/main/java/com/leekwars/generator/maps/MaskAreaCell.java
+ */
+#include "lw_area.h"
+#include "lw_attack.h"  /* min_range / max_range / need_los static inlines */
+#include "lw_entity.h"
+#include "lw_map.h"
+
+#include <stddef.h>
+
+
+/* ---- Forward decls for the engine APIs we call --------------------
+ *
+ * Map / Attack / Leek live in their own (mostly not-yet-ported)
+ * headers. We only need the function signatures here; the linker
+ * resolves them once those modules exist. */
+
+/* maps/Map.java */
+LwCell *lw_map_get_cell_xy(const struct LwMap *map, int x, int y);
+LwCell *lw_map_get_first_entity(const struct LwMap *map,
+                                LwCell *from, LwCell *target,
+                                int min_range, int max_range);
+struct LwState *lw_map_get_state(const struct LwMap *map);
+
+/* state/State.java -- iterating map.getState().getEntities().values()
+ * Returns a contiguous array (state owns the storage) and writes the
+ * count to *out_n. Iteration order matches Java's HashMap insertion
+ * iteration -- the State port is responsible for preserving it. */
+struct LwLeek **lw_state_get_entities(const struct LwState *state, int *out_n);
+
+/* attack/Attack.java */
+int lw_attack_get_min_range(const struct LwAttack *self);
+int lw_attack_get_max_range(const struct LwAttack *self);
+int lw_attack_need_los    (const struct LwAttack *self);
+
+/* state/Entity.java (we use LwLeek as the caster type per spec). */
+int          lw_leek_get_team(const struct LwLeek *self);
+const char  *lw_leek_get_name(const struct LwLeek *self);
+LwCell      *lw_leek_get_cell(const struct LwLeek *self);
+
+
+/* ---- Tiny string helper (Java: String.contains) ------------------ */
+
+static int lw_str_contains(const char *haystack, const char *needle) {
+    if (haystack == NULL || needle == NULL) return 0;
+    for (const char *h = haystack; *h; ++h) {
+        const char *a = h, *b = needle;
+        while (*a && *b && *a == *b) { ++a; ++b; }
+        if (*b == '\0') return 1;
+    }
+    return 0;
+}
+
+static int lw_abs_i(int v) { return v < 0 ? -v : v; }
+
+
+/* ---- MaskAreaCell.java -------------------------------------------
+ *
+ * Java declares each AreaXxx subclass with
+ *
+ *     private static int[][] area = MaskAreaCell.generateXxxMask(...);
+ *
+ * which builds the mask once at class-load time. In C we precompute
+ * the masks lazily into module-static buffers on first use.
+ *
+ * Maximum cell counts (verified by running the formulas):
+ *   CIRCLE1 :  5    PLUS_2  :  9
+ *   CIRCLE2 : 13    PLUS_3  : 13
+ *   CIRCLE3 : 25    X_1     :  5
+ *   SQUARE_1:  9    X_2     :  9
+ *   SQUARE_2: 25    X_3     : 13
+ *
+ * Largest is 25 -- we size every buffer to 32 to keep the math
+ * obvious.
  */
 
-#include "lw_area.h"
-#include <stdlib.h>
-
-
-/* Each mask is a list of (dx, dy). LW_MASK_MAX is a soft cap; the
- * largest shape we generate (Square 2) has 25 cells, so 64 leaves
- * plenty of headroom. */
-#define LW_MASK_MAX  64
+#define LW_AREA_MASK_CAP 32
 
 typedef struct {
+    int built;
     int n;
-    int8_t dx[LW_MASK_MAX];
-    int8_t dy[LW_MASK_MAX];
-} Mask;
+    int cells[LW_AREA_MASK_CAP][2];
+} LwAreaMask;
 
 
-/* Slots indexed by area_type (1..12). Slot 0 is unused. */
-static Mask masks[16];
-static int  masks_built = 0;
-
-
-/* generateCircleMask(min_, max_) -- byte-for-byte port. */
-static void gen_circle(Mask *m, int min_v, int max_v) {
-    if (min_v > max_v) { m->n = 0; return; }
-    int idx = 0;
-    if (min_v == 0) {
-        m->dx[idx] = 0;
-        m->dy[idx] = 0;
-        idx++;
+/* public static int[][] generateCircleMask(int min, int max) */
+static void lw_mask_generate_circle(LwAreaMask *m, int min, int max) {
+    if (min > max) {
+        m->n = 0;
+        return;
     }
-    int start_size = (min_v < 1) ? 1 : min_v;
-    for (int size = start_size; size <= max_v; size++) {
-        for (int i = 0; i < size; i++) { m->dx[idx] = (int8_t)(size - i); m->dy[idx] = (int8_t)(-i);          idx++; }
-        for (int i = 0; i < size; i++) { m->dx[idx] = (int8_t)(-i);      m->dy[idx] = (int8_t)(-(size - i)); idx++; }
-        for (int i = 0; i < size; i++) { m->dx[idx] = (int8_t)(-(size - i)); m->dy[idx] = (int8_t)(i);       idx++; }
-        for (int i = 0; i < size; i++) { m->dx[idx] = (int8_t)(i);       m->dy[idx] = (int8_t)(size - i);    idx++; }
+    int index = 0;
+    if (min == 0) {
+        // Center first
+        m->cells[index][0] = 0; m->cells[index][1] = 0; index++;
     }
-    m->n = idx;
+
+    // Go from cells closer to the center to the farther ones
+    for (int size = (min < 1 ? 1 : min); size <= max; size++) {
+        // Add cells counter-clockwise
+        for (int i = 0; i < size; i++) {
+            m->cells[index][0] = size - i; m->cells[index][1] = -i; index++;
+        }
+        for (int i = 0; i < size; i++) {
+            m->cells[index][0] = -i; m->cells[index][1] = -(size - i); index++;
+        }
+        for (int i = 0; i < size; i++) {
+            m->cells[index][0] = -(size - i); m->cells[index][1] = i; index++;
+        }
+        for (int i = 0; i < size; i++) {
+            m->cells[index][0] = i; m->cells[index][1] = size - i; index++;
+        }
+    }
+    m->n = index;
 }
 
+/* public static int[][] generatePlusMask(int radius) */
+static void lw_mask_generate_plus(LwAreaMask *m, int radius) {
+    int index = 0;
+    // Center first
+    m->cells[index][0] = 0; m->cells[index][1] = 0; index++;
 
-static void gen_plus(Mask *m, int radius) {
-    int idx = 0;
-    m->dx[idx] = 0; m->dy[idx] = 0; idx++;
+    // Go from cells closer to the center to the farther ones
     for (int size = 1; size <= radius; size++) {
-        m->dx[idx] = (int8_t)size;  m->dy[idx] = 0;             idx++;
-        m->dx[idx] = 0;             m->dy[idx] = (int8_t)(-size); idx++;
-        m->dx[idx] = (int8_t)(-size); m->dy[idx] = 0;             idx++;
-        m->dx[idx] = 0;             m->dy[idx] = (int8_t)size;  idx++;
+        // Add cells counter-clockwise
+        m->cells[index][0] =  size; m->cells[index][1] =     0; index++;
+        m->cells[index][0] =     0; m->cells[index][1] = -size; index++;
+        m->cells[index][0] = -size; m->cells[index][1] =     0; index++;
+        m->cells[index][0] =     0; m->cells[index][1] =  size; index++;
     }
-    m->n = idx;
+    m->n = index;
 }
 
+/* public static int[][] generateXMask(int radius) */
+static void lw_mask_generate_x(LwAreaMask *m, int radius) {
+    int index = 0;
+    // Center first
+    m->cells[index][0] = 0; m->cells[index][1] = 0; index++;
 
-static void gen_x(Mask *m, int radius) {
-    int idx = 0;
-    m->dx[idx] = 0; m->dy[idx] = 0; idx++;
+    // Go from cells closer to the center to the farther ones
     for (int size = 1; size <= radius; size++) {
-        m->dx[idx] = (int8_t)size;     m->dy[idx] = (int8_t)(-size); idx++;
-        m->dx[idx] = (int8_t)(-size);  m->dy[idx] = (int8_t)(-size); idx++;
-        m->dx[idx] = (int8_t)(-size);  m->dy[idx] = (int8_t)size;    idx++;
-        m->dx[idx] = (int8_t)size;     m->dy[idx] = (int8_t)size;    idx++;
+        // Add cells counter-clockwise
+        m->cells[index][0] =  size; m->cells[index][1] = -size; index++;
+        m->cells[index][0] = -size; m->cells[index][1] = -size; index++;
+        m->cells[index][0] = -size; m->cells[index][1] =  size; index++;
+        m->cells[index][0] =  size; m->cells[index][1] =  size; index++;
     }
-    m->n = idx;
+    m->n = index;
 }
 
+/* public static int[][] generateSquareMask(int radius) */
+static void lw_mask_generate_square(LwAreaMask *m, int radius) {
+    // Go from cells closer to the center to the farther ones
+    // First, add cells in the inscribed circle
+    LwAreaMask circle;
+    lw_mask_generate_circle(&circle, 0, radius);
 
-static void gen_square(Mask *m, int radius) {
-    /* Inscribed circle first, then corners ring-by-ring. */
-    Mask circle;
-    gen_circle(&circle, 0, radius);
-    int idx = 0;
+    int index = 0;
     for (int i = 0; i < circle.n; i++) {
-        m->dx[idx] = circle.dx[i]; m->dy[idx] = circle.dy[i]; idx++;
+        m->cells[index][0] = circle.cells[i][0];
+        m->cells[index][1] = circle.cells[i][1];
+        index++;
     }
+    // Then, the corners
     for (int d = 0; d < radius; d++) {
+        // Add cells counter-clockwise
         for (int i = 1; i <= radius - d; i++) {
-            m->dx[idx] = (int8_t)(radius + 1 - i); m->dy[idx] = (int8_t)(-(d + i)); idx++;
+            m->cells[index][0] =  radius + 1 - i; m->cells[index][1] = -(d + i); index++;
         }
         for (int i = 1; i <= radius - d; i++) {
-            m->dx[idx] = (int8_t)(-(d + i));       m->dy[idx] = (int8_t)(-(radius + 1 - i)); idx++;
+            m->cells[index][0] = -(d + i); m->cells[index][1] = -(radius + 1 - i); index++;
         }
         for (int i = 1; i <= radius - d; i++) {
-            m->dx[idx] = (int8_t)(-(radius + 1 - i)); m->dy[idx] = (int8_t)(d + i); idx++;
+            m->cells[index][0] = -(radius + 1 - i); m->cells[index][1] = d + i; index++;
         }
         for (int i = 1; i <= radius - d; i++) {
-            m->dx[idx] = (int8_t)(d + i);          m->dy[idx] = (int8_t)(radius + 1 - i); idx++;
+            m->cells[index][0] = d + i; m->cells[index][1] = radius + 1 - i; index++;
         }
     }
-    m->n = idx;
+    m->n = index;
 }
 
 
-/* Build all masks once on first use. Threadsafe for our use (single
- * fight-driver thread + read-only after). */
-static void build_masks(void) {
-    if (masks_built) return;
+/* Lazy accessors for the per-subclass masks. Each Java
+ * `private static int[][] area = MaskAreaCell.generate...()` becomes
+ * a one-shot init below. */
 
-    /* Single cell: just (0, 0). */
-    masks[LW_AREA_TYPE_SINGLE_CELL].n = 1;
-    masks[LW_AREA_TYPE_SINGLE_CELL].dx[0] = 0;
-    masks[LW_AREA_TYPE_SINGLE_CELL].dy[0] = 0;
+static LwAreaMask g_mask_circle1, g_mask_circle2, g_mask_circle3;
+static LwAreaMask g_mask_plus2,   g_mask_plus3;
+static LwAreaMask g_mask_x1,      g_mask_x2,      g_mask_x3;
+static LwAreaMask g_mask_square1, g_mask_square2;
 
-    gen_circle(&masks[LW_AREA_TYPE_CIRCLE_1], 0, 1);
-    gen_circle(&masks[LW_AREA_TYPE_CIRCLE_2], 0, 2);
-    gen_circle(&masks[LW_AREA_TYPE_CIRCLE_3], 0, 3);
-
-    gen_plus(&masks[LW_AREA_TYPE_PLUS_2], 2);
-    gen_plus(&masks[LW_AREA_TYPE_PLUS_3], 3);
-
-    gen_x(&masks[LW_AREA_TYPE_X_1], 1);
-    gen_x(&masks[LW_AREA_TYPE_X_2], 2);
-    gen_x(&masks[LW_AREA_TYPE_X_3], 3);
-
-    gen_square(&masks[LW_AREA_TYPE_SQUARE_1], 1);
-    gen_square(&masks[LW_AREA_TYPE_SQUARE_2], 2);
-
-    masks_built = 1;
-}
-
-
-static int cell_id_at(const LwTopology *topo, int x, int y) {
-    int gx = x - topo->min_x;
-    int gy = y - topo->min_y;
-    if (gx < 0 || gx >= LW_COORD_DIM) return -1;
-    if (gy < 0 || gy >= LW_COORD_DIM) return -1;
-    return topo->coord_lut[gx][gy];
-}
-
-
-int lw_area_get_mask_cells(const LwTopology *topo,
-                           int area_type,
-                           int target_cell_id,
-                           int *out, int max_out) {
-    if (topo == NULL || out == NULL || max_out <= 0) return 0;
-    if (target_cell_id < 0 || target_cell_id >= topo->n_cells) return 0;
-    if (area_type < 1 || area_type >= (int)(sizeof(masks)/sizeof(masks[0]))) return 0;
-
-    build_masks();
-    const Mask *m = &masks[area_type];
-    if (m->n == 0) return 0;
-
-    const LwCell *target = &topo->cells[target_cell_id];
-    int written = 0;
-    for (int i = 0; i < m->n && written < max_out; i++) {
-        int x = target->x + m->dx[i];
-        int y = target->y + m->dy[i];
-        int cid = cell_id_at(topo, x, y);
-        if (cid < 0) continue;
-        if (!topo->cells[cid].walkable) continue;
-        out[written++] = cid;
-    }
-    return written;
-}
-
-
-/* Walk one unit step from launch toward target (axis-aligned only).
- * Returns 0 dx + 0 dy if the cells aren't on the same row/col. */
-static void unit_step(const LwCell *launch, const LwCell *target,
-                      int *out_dx, int *out_dy) {
-    *out_dx = 0;
-    *out_dy = 0;
-    if (launch->x == target->x) {
-        *out_dy = (launch->y > target->y) ? -1 : 1;
-    } else if (launch->y == target->y) {
-        *out_dx = (launch->x > target->x) ? -1 : 1;
+static const LwAreaMask *lw_mask_for_tag(LwAreaType tag) {
+    switch (tag) {
+        case LW_AREA_TAG_CIRCLE1:
+            if (!g_mask_circle1.built) { lw_mask_generate_circle(&g_mask_circle1, 0, 1); g_mask_circle1.built = 1; }
+            return &g_mask_circle1;
+        case LW_AREA_TAG_CIRCLE2:
+            if (!g_mask_circle2.built) { lw_mask_generate_circle(&g_mask_circle2, 0, 2); g_mask_circle2.built = 1; }
+            return &g_mask_circle2;
+        case LW_AREA_TAG_CIRCLE3:
+            if (!g_mask_circle3.built) { lw_mask_generate_circle(&g_mask_circle3, 0, 3); g_mask_circle3.built = 1; }
+            return &g_mask_circle3;
+        case LW_AREA_TAG_PLUS_2:
+            if (!g_mask_plus2.built) { lw_mask_generate_plus(&g_mask_plus2, 2); g_mask_plus2.built = 1; }
+            return &g_mask_plus2;
+        case LW_AREA_TAG_PLUS_3:
+            if (!g_mask_plus3.built) { lw_mask_generate_plus(&g_mask_plus3, 3); g_mask_plus3.built = 1; }
+            return &g_mask_plus3;
+        case LW_AREA_TAG_X_1:
+            if (!g_mask_x1.built) { lw_mask_generate_x(&g_mask_x1, 1); g_mask_x1.built = 1; }
+            return &g_mask_x1;
+        case LW_AREA_TAG_X_2:
+            if (!g_mask_x2.built) { lw_mask_generate_x(&g_mask_x2, 2); g_mask_x2.built = 1; }
+            return &g_mask_x2;
+        case LW_AREA_TAG_X_3:
+            if (!g_mask_x3.built) { lw_mask_generate_x(&g_mask_x3, 3); g_mask_x3.built = 1; }
+            return &g_mask_x3;
+        case LW_AREA_TAG_SQUARE_1:
+            if (!g_mask_square1.built) { lw_mask_generate_square(&g_mask_square1, 1); g_mask_square1.built = 1; }
+            return &g_mask_square1;
+        case LW_AREA_TAG_SQUARE_2:
+            if (!g_mask_square2.built) { lw_mask_generate_square(&g_mask_square2, 2); g_mask_square2.built = 1; }
+            return &g_mask_square2;
+        default:
+            return NULL;
     }
 }
 
 
-static int laser_line_cells(const LwState *state,
-                            const LwAttack *attack,
-                            int launch_cell_id,
-                            int target_cell_id,
-                            int *out, int max_out) {
-    const LwTopology *topo = state->map.topo;
-    if (launch_cell_id < 0 || target_cell_id < 0) return 0;
-
-    const LwCell *lc = &topo->cells[launch_cell_id];
-    const LwCell *tc = &topo->cells[target_cell_id];
-    int dx, dy;
-    unit_step(lc, tc, &dx, &dy);
-    if (dx == 0 && dy == 0) return 0;  /* not on same axis */
-
-    int written = 0;
-    for (int i = attack->min_range;
-         i <= attack->max_range && written < max_out;
-         i++) {
-        int x = lc->x + dx * i;
-        int y = lc->y + dy * i;
-        int cid = cell_id_at(topo, x, y);
-        if (cid < 0) break;
-        if (attack->needs_los && !topo->cells[cid].walkable) break;
-        out[written++] = cid;
+/* ---- AreaSingleCell.java -----------------------------------------
+ *
+ * @Override
+ * public List<Cell> getArea(Map map, Cell launchCell, Cell targetCell, Entity caster) {
+ *     ArrayList<Cell> area = new ArrayList<Cell>();
+ *     area.add(targetCell);
+ *     return area;
+ * }
+ */
+static int lw_area_single_cell_get_area(const struct LwMap *map,
+                                        LwCell *launchCell, LwCell *targetCell,
+                                        struct LwLeek *caster,
+                                        LwCell *out_buf, int out_cap) {
+    (void)map; (void)launchCell; (void)caster;
+    int n = 0;
+    if (targetCell != NULL) {
+        if (n < out_cap) out_buf[n] = *targetCell;
+        n++;
     }
-    return written;
+    return n;
 }
 
 
-static int first_in_line_cells(const LwState *state,
-                               const LwAttack *attack,
-                               int launch_cell_id,
-                               int target_cell_id,
-                               int *out, int max_out) {
-    const LwTopology *topo = state->map.topo;
-    if (launch_cell_id < 0 || target_cell_id < 0) return 0;
+/* ---- MaskArea.java (used by Circle/Plus/X/Square subclasses) -----
+ *
+ * @Override
+ * public List<Cell> getArea(Map map, Cell launchCell, Cell targetCell, Entity caster) {
+ *     int x = targetCell.getX(), y = targetCell.getY();
+ *     ArrayList<Cell> cells = new ArrayList<Cell>();
+ *     for (int i = 0; i < area.length; i++) {
+ *         Cell c = map.getCell(x + area[i][0], y + area[i][1]);
+ *         if (c == null || !c.isWalkable())
+ *             continue;
+ *         cells.add(c);
+ *     }
+ *     return cells;
+ * }
+ */
+static int lw_area_mask_get_area(const LwAreaMask *area,
+                                 const struct LwMap *map,
+                                 LwCell *launchCell, LwCell *targetCell,
+                                 struct LwLeek *caster,
+                                 LwCell *out_buf, int out_cap) {
+    (void)launchCell; (void)caster;
+    int n = 0;
+    if (targetCell == NULL || area == NULL) return 0;
+    int x = targetCell->x, y = targetCell->y;
+    for (int i = 0; i < area->n; i++) {
+        LwCell *c = lw_map_get_cell_xy(map, x + area->cells[i][0], y + area->cells[i][1]);
+        if (c == NULL || !c->walkable)
+            continue;
+        if (n < out_cap) out_buf[n] = *c;
+        n++;
+    }
+    return n;
+}
 
-    const LwCell *lc = &topo->cells[launch_cell_id];
-    const LwCell *tc = &topo->cells[target_cell_id];
-    int dx, dy;
-    unit_step(lc, tc, &dx, &dy);
-    if (dx == 0 && dy == 0) return 0;
 
-    for (int i = attack->min_range; i <= attack->max_range; i++) {
-        int x = lc->x + dx * i;
-        int y = lc->y + dy * i;
-        int cid = cell_id_at(topo, x, y);
-        if (cid < 0) break;
-        int eid = state->map.entity_at_cell[cid];
-        if (eid >= 0 && state->entities[eid].alive) {
-            if (max_out < 1) return 0;
-            out[0] = cid;
-            return 1;
+/* ---- AreaLaserLine.java ------------------------------------------
+ *
+ * @Override
+ * public List<Cell> getArea(Map map, Cell launchCell, Cell targetCell, Entity caster) {
+ *     ArrayList<Cell> cells = new ArrayList<Cell>();
+ *     int dx = 0, dy = 0;
+ *     if (launchCell.getX() == targetCell.getX()) {
+ *         if (launchCell.getY() > targetCell.getY()) dy = -1; else dy = 1;
+ *     } else if (launchCell.getY() == targetCell.getY()) {
+ *         if (launchCell.getX() > targetCell.getX()) dx = -1; else dx = 1;
+ *     } else
+ *         return cells;
+ *
+ *     int x = launchCell.getX(), y = launchCell.getY();
+ *     for (int i = mAttack.getMinRange(); i <= mAttack.getMaxRange(); i++) {
+ *         Cell c = map.getCell(x + dx * i, y + dy * i);
+ *         if (c == null) break;
+ *         if (mAttack.needLos() && !c.isWalkable()) break;
+ *         else if (mAttack.needLos() && !c.isWalkable()) break;
+ *         cells.add(c);
+ *     }
+ *     return cells;
+ * }
+ *
+ * NOTE: The duplicated `else if` clause above mirrors the Java source
+ * verbatim (it's a no-op duplicate -- left as-is for parity).
+ */
+static int lw_area_laser_line_get_area(const struct LwAttack *mAttack,
+                                       const struct LwMap *map,
+                                       LwCell *launchCell, LwCell *targetCell,
+                                       struct LwLeek *caster,
+                                       LwCell *out_buf, int out_cap) {
+    (void)caster;
+    int n = 0;
+    int dx = 0, dy = 0;
+    if (launchCell == NULL || targetCell == NULL) return 0;
+    if (launchCell->x == targetCell->x) {
+        if (launchCell->y > targetCell->y)
+            dy = -1;
+        else
+            dy = 1;
+    } else if (launchCell->y == targetCell->y) {
+        if (launchCell->x > targetCell->x)
+            dx = -1;
+        else
+            dx = 1;
+    } else
+        return n;
+
+    int x = launchCell->x, y = launchCell->y;
+    for (int i = lw_attack_get_min_range(mAttack); i <= lw_attack_get_max_range(mAttack); i++) {
+
+        LwCell *c = lw_map_get_cell_xy(map, x + dx * i, y + dy * i);
+        if (c == NULL) {
+            break;
         }
+        if (lw_attack_need_los(mAttack) && !c->walkable) {
+            break;
+        } else if (lw_attack_need_los(mAttack) && !c->walkable) {
+            break;
+        }
+        if (n < out_cap) out_buf[n] = *c;
+        n++;
+    }
+    return n;
+}
+
+
+/* ---- AreaFirstInLine.java ----------------------------------------
+ *
+ * @Override
+ * public List<Cell> getArea(Map map, Cell launchCell, Cell targetCell, Entity caster) {
+ *     List<Cell> cells = new ArrayList<>();
+ *     Cell cell = map.getFirstEntity(launchCell, targetCell, mAttack.getMinRange(), mAttack.getMaxRange());
+ *     if (cell != null) {
+ *         cells.add(cell);
+ *     }
+ *     return cells;
+ * }
+ */
+static int lw_area_first_in_line_get_area(const struct LwAttack *mAttack,
+                                          const struct LwMap *map,
+                                          LwCell *launchCell, LwCell *targetCell,
+                                          struct LwLeek *caster,
+                                          LwCell *out_buf, int out_cap) {
+    (void)caster;
+    int n = 0;
+    LwCell *cell = lw_map_get_first_entity(map, launchCell, targetCell,
+                                           lw_attack_get_min_range(mAttack),
+                                           lw_attack_get_max_range(mAttack));
+    if (cell != NULL) {
+        if (n < out_cap) out_buf[n] = *cell;
+        n++;
+    }
+    return n;
+}
+
+
+/* ---- AreaAllies.java ---------------------------------------------
+ *
+ * @Override
+ * public List<Cell> getArea(Map map, Cell launchCell, Cell targetCell, Entity caster) {
+ *     var cells = new ArrayList<Cell>();
+ *     if (caster != null) {
+ *         for (var entity : map.getState().getEntities().values()) {
+ *             if (entity.getTeam() == caster.getTeam() && entity.getName().contains("crystal")) continue;
+ *             if (entity.getCell() != null && entity.getTeam() == caster.getTeam()) {
+ *                 cells.add(entity.getCell());
+ *             }
+ *         }
+ *     }
+ *     return cells;
+ * }
+ */
+static int lw_area_allies_get_area(const struct LwMap *map,
+                                   LwCell *launchCell, LwCell *targetCell,
+                                   struct LwLeek *caster,
+                                   LwCell *out_buf, int out_cap) {
+    (void)launchCell; (void)targetCell;
+    int n = 0;
+    if (caster != NULL) {
+        int n_entities = 0;
+        struct LwLeek **entities = lw_state_get_entities(lw_map_get_state(map), &n_entities);
+        for (int i = 0; i < n_entities; i++) {
+            struct LwLeek *entity = entities[i];
+            if (lw_leek_get_team(entity) == lw_leek_get_team(caster)
+                && lw_str_contains(lw_leek_get_name(entity), "crystal")) continue;
+            if (lw_leek_get_cell(entity) != NULL && lw_leek_get_team(entity) == lw_leek_get_team(caster)) {
+                LwCell *c = lw_leek_get_cell(entity);
+                if (n < out_cap) out_buf[n] = *c;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+
+/* ---- AreaEnemies.java --------------------------------------------
+ *
+ * @Override
+ * public List<Cell> getArea(Map map, Cell launchCell, Cell targetCell, Entity caster) {
+ *     var cells = new ArrayList<Cell>();
+ *     if (caster != null) {
+ *         for (var entity : map.getState().getEntities().values()) {
+ *             if (entity.getCell() != null && entity.getTeam() != caster.getTeam()) {
+ *                 cells.add(entity.getCell());
+ *             }
+ *         }
+ *     }
+ *     return cells;
+ * }
+ */
+static int lw_area_enemies_get_area(const struct LwMap *map,
+                                    LwCell *launchCell, LwCell *targetCell,
+                                    struct LwLeek *caster,
+                                    LwCell *out_buf, int out_cap) {
+    (void)launchCell; (void)targetCell;
+    int n = 0;
+    if (caster != NULL) {
+        int n_entities = 0;
+        struct LwLeek **entities = lw_state_get_entities(lw_map_get_state(map), &n_entities);
+        for (int i = 0; i < n_entities; i++) {
+            struct LwLeek *entity = entities[i];
+            if (lw_leek_get_cell(entity) != NULL && lw_leek_get_team(entity) != lw_leek_get_team(caster)) {
+                LwCell *c = lw_leek_get_cell(entity);
+                if (n < out_cap) out_buf[n] = *c;
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+
+/* Suppress unused-static warnings for lw_abs_i (kept around because
+ * the Java sources use Math.abs heavily and future area subclasses
+ * may need it). */
+static void lw_area_unused_keepers(void) {
+    (void)lw_abs_i(0);
+}
+
+
+/* ---- public dispatch --------------------------------------------- */
+
+/* Java: public abstract List<Cell> getArea(...)
+ *
+ * Switch on the tag, call the matching per-type implementation. */
+int lw_area_get_area(const LwArea *self,
+                     const struct LwMap *map,
+                     LwCell *cast,
+                     LwCell *target,
+                     struct LwLeek *caster,
+                     LwCell *out_buf,
+                     int out_cap) {
+    if (self == NULL) return 0;
+    switch (self->type) {
+        case LW_AREA_TAG_SINGLE_CELL:
+            return lw_area_single_cell_get_area(map, cast, target, caster, out_buf, out_cap);
+        case LW_AREA_TAG_LASER_LINE:
+            return lw_area_laser_line_get_area(self->attack, map, cast, target, caster, out_buf, out_cap);
+        case LW_AREA_TAG_CIRCLE1:
+        case LW_AREA_TAG_CIRCLE2:
+        case LW_AREA_TAG_CIRCLE3:
+        case LW_AREA_TAG_PLUS_2:
+        case LW_AREA_TAG_PLUS_3:
+        case LW_AREA_TAG_X_1:
+        case LW_AREA_TAG_X_2:
+        case LW_AREA_TAG_X_3:
+        case LW_AREA_TAG_SQUARE_1:
+        case LW_AREA_TAG_SQUARE_2:
+            return lw_area_mask_get_area(lw_mask_for_tag(self->type),
+                                         map, cast, target, caster, out_buf, out_cap);
+        case LW_AREA_TAG_FIRST_IN_LINE:
+            return lw_area_first_in_line_get_area(self->attack, map, cast, target, caster, out_buf, out_cap);
+        case LW_AREA_TAG_ALLIES:
+            return lw_area_allies_get_area(map, cast, target, caster, out_buf, out_cap);
+        case LW_AREA_TAG_ENEMIES:
+            return lw_area_enemies_get_area(map, cast, target, caster, out_buf, out_cap);
     }
     return 0;
 }
 
 
-static int team_filtered_cells(const LwState *state,
-                               int caster_idx,
-                               int allies,  /* 1 = allies, 0 = enemies */
-                               int *out, int max_out) {
-    if (caster_idx < 0 || caster_idx >= state->n_entities) return 0;
-    int caster_team = state->entities[caster_idx].team_id;
-    int written = 0;
-    for (int i = 0; i < state->n_entities && written < max_out; i++) {
-        const LwEntity *e = &state->entities[i];
-        if (e->cell_id < 0) continue;
-        int same_team = (e->team_id == caster_team);
-        if (allies != same_team) continue;
-        out[written++] = e->cell_id;
+/* Java: public static Area getArea(Attack attack, byte type)
+ *
+ * if (type == Area.TYPE_SINGLE_CELL) return new AreaSingleCell(attack);
+ * else if (type == Area.TYPE_LASER_LINE) return new AreaLaserLine(attack);
+ * else if (type == Area.TYPE_CIRCLE1 || type == Area.TYPE_AREA_PLUS_1) return new AreaCircle1(attack);
+ * else if (type == Area.TYPE_CIRCLE2) return new AreaCircle2(attack);
+ * ... etc. ...
+ * return null;
+ *
+ * NOTE: TYPE_AREA_PLUS_1 == TYPE_CIRCLE1 in Java, so the OR clause
+ * collapses into the same case here.
+ */
+int lw_area_get_area_for_type(LwArea *out, const struct LwAttack *attack, int type) {
+    if (out == NULL) return 0;
+    out->attack = attack;
+    if (type == LW_AREA_TYPE_SINGLE_CELL) {
+        out->type = LW_AREA_TAG_SINGLE_CELL;
+    } else if (type == LW_AREA_TYPE_LASER_LINE) {
+        out->type = LW_AREA_TAG_LASER_LINE;
+    } else if (type == LW_AREA_TYPE_CIRCLE1 || type == LW_AREA_TYPE_AREA_PLUS_1) {
+        out->type = LW_AREA_TAG_CIRCLE1;
+    } else if (type == LW_AREA_TYPE_CIRCLE2) {
+        out->type = LW_AREA_TAG_CIRCLE2;
+    } else if (type == LW_AREA_TYPE_CIRCLE3) {
+        out->type = LW_AREA_TAG_CIRCLE3;
+    } else if (type == LW_AREA_TYPE_AREA_PLUS_2) {
+        out->type = LW_AREA_TAG_PLUS_2;
+    } else if (type == LW_AREA_TYPE_AREA_PLUS_3) {
+        out->type = LW_AREA_TAG_PLUS_3;
+    } else if (type == LW_AREA_TYPE_X_1) {
+        out->type = LW_AREA_TAG_X_1;
+    } else if (type == LW_AREA_TYPE_X_2) {
+        out->type = LW_AREA_TAG_X_2;
+    } else if (type == LW_AREA_TYPE_X_3) {
+        out->type = LW_AREA_TAG_X_3;
+    } else if (type == LW_AREA_TYPE_SQUARE_1) {
+        out->type = LW_AREA_TAG_SQUARE_1;
+    } else if (type == LW_AREA_TYPE_SQUARE_2) {
+        out->type = LW_AREA_TAG_SQUARE_2;
+    } else if (type == LW_AREA_TYPE_FIRST_IN_LINE) {
+        out->type = LW_AREA_TAG_FIRST_IN_LINE;
+    } else if (type == LW_AREA_TYPE_ALLIES) {
+        out->type = LW_AREA_TAG_ALLIES;
+    } else if (type == LW_AREA_TYPE_ENEMIES) {
+        out->type = LW_AREA_TAG_ENEMIES;
+    } else {
+        return 0;
     }
-    return written;
-}
-
-
-int lw_area_get_cells(const LwState *state,
-                      const LwAttack *attack,
-                      int caster_idx,
-                      int launch_cell_id,
-                      int target_cell_id,
-                      int *out, int max_out) {
-    if (state == NULL || attack == NULL || out == NULL) return 0;
-    int t = attack->area;
-    switch (t) {
-        case LW_AREA_TYPE_LASER_LINE:
-            return laser_line_cells(state, attack,
-                                    launch_cell_id, target_cell_id,
-                                    out, max_out);
-        case LW_AREA_TYPE_FIRST_IN_LINE:
-            return first_in_line_cells(state, attack,
-                                       launch_cell_id, target_cell_id,
-                                       out, max_out);
-        case LW_AREA_TYPE_ALLIES:
-            return team_filtered_cells(state, caster_idx, 1, out, max_out);
-        case LW_AREA_TYPE_ENEMIES:
-            return team_filtered_cells(state, caster_idx, 0, out, max_out);
-        default:
-            return lw_area_get_mask_cells(state->map.topo, t,
-                                          target_cell_id, out, max_out);
-    }
+    /* Touch the unused-keeper to silence -Wunused-function warnings
+     * about lw_area_unused_keepers / lw_abs_i. */
+    if (type == -999999) lw_area_unused_keepers();
+    return 1;
 }

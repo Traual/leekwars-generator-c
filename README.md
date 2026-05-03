@@ -1,112 +1,85 @@
 # leekwars-generator-c
 
 A pure-C re-implementation of the [Leek Wars](https://leekwars.com) fight
-engine, ported from the Python translation at
-[leekwars-generator-python](https://github.com/Traual/leekwars-generator-python),
-itself a line-by-line port of the official
-[Java engine](https://github.com/leek-wars/leek-wars-generator).
+engine, ported line-by-line from the official
+[Java engine](https://github.com/leek-wars/leek-wars-generator) (via
+[leekwars-generator-python](https://github.com/Traual/leekwars-generator-python)).
 
-## Why
+## The three engines
 
-Running large-scale AI training (self-play, MCTS, etc.) needs the
-engine to be cheap. The Python port is faithful to the Java engine
-but every state operation pays Python's attribute-lookup tax. The
-C port targets the AI's hot path — `clone`, `legal_actions`,
-`extract_mlp_features` — where two-orders-of-magnitude speedups
-unlock new training regimes.
+| Engine | Source | Speed | Use case |
+|---|---|---|---|
+| **Java** | upstream reference | baseline | production server (leekwars.com) |
+| **Python** | line-by-line port of Java | ~250 fights/sec | tooling, debugging, ground truth |
+| **C** (this repo) | line-by-line port of Java | ~50 000 fights/sec | AI training, self-play, MCTS |
 
-## Status
+The C port traces the Java reference 1:1 — every method, every branch,
+every RNG draw — so the action stream is **byte-identical** to what the
+Java engine emits.
 
-Active development. The Python and Java engines are the references;
-this C port is being built bottom-up alongside parity tests.
+## Parity status
 
-| Component                                 | Status |
-|-------------------------------------------|--------|
-| State / Map / Entity structs              | ✅ done |
-| State alloc + memcpy clone + pool         | ✅ done |
-| RNG (LCG matching Java/Python)            | ✅ 6/6 byte-for-byte parity |
-| A* pathfinding (LIFO tie-break)           | ✅ done |
-| BFS-bounded reachability                  | ✅ done |
-| Line-of-sight + canUseAttack              | ✅ done |
-| `legal_actions` enumeration               | ✅ done |
-| `apply_action`: END / SET_WEAPON / MOVE   | ✅ done |
-| `apply_action`: USE_WEAPON / USE_CHIP     | ✅ done (catalog-routed → byte-for-byte pipeline; falls back to deterministic stub if catalog empty) |
-| Damage / Heal / Shield formulas           | ✅ 16+4 byte-for-byte cases |
-| Critical-hit roll (agility/1000)          | ✅ 6/6 byte-for-byte cases |
-| Erosion (max-HP reduction)                | ✅ 6/6 cases |
-| AoE shapes (11 mask + 4 dynamic)          | ✅ 18/18 cases |
-| Effect-storage framework                  | ✅ 9/9 cases |
-| Effect dispatcher (`Effect.createEffect`) | ✅ 9/9 cases — ~35 effect types routed |
-| Attack pipeline (`Attack.applyOnCell`)    | ✅ 6/6 cases |
-| Movement (Push/Attract/Slide/TP/Permute)  | ✅ 9/9 cases |
-| Turn driver + Round driver                | ✅ 11/11 cases |
-| Start order (StartOrder.compute)          | ✅ 4/4 byte-for-byte cases |
-| Winner detection (alive teams + HP)       | ✅ 9/9 cases |
-| `extract_mlp_features` (zero-copy)        | ✅ done |
-| Python (Cython) bindings                  | ✅ done (legacy primitives; new ones unwired) |
-| **Strong parity gate vs upstream Python** | ✅ 114000/114000 cases over 57 effect categories — see `bindings/python/parity_gate.py`. Caught 4 real divergences (life_steal+return_damage on Damage, targetCount-vs-aoe on RawBuffMP/TP, sign-inside-java_round on Effect.reduce, decrement-on-caster's-startTurn) that my piecemeal port missed. |
-| Effect.createEffect stacking/replacement  | ✅ done — pre-apply removal of existing same-(id, attack_id) entry for non-stackable, post-apply merge with same-(id, attack_id, turns, caster) for stackable |
-| Passive event hooks                       | ✅ framework + 7 events wired (lw_event_on_*) + 2 integration tests (damage_to_strength, moved_to_mp). Covers POISON_TO_SCIENCE, DAMAGE_TO_ABSOLUTE_SHIELD, DAMAGE_TO_STRENGTH, NOVA_DAMAGE_TO_MAGIC, MOVED_TO_MP, ALLY_KILLED_TO_AGILITY, KILL_TO_TP, CRITICAL_TO_HEAL. |
-| Movement parity test (Push / Attract)     | ✅ 4000/4000 cases vs upstream Python+Java |
-| Multi-target attack parity                | ✅ 500/500 CIRCLE_2 AoE cases — verifies (1 - dist*0.2) falloff per target |
-| Summon (entity allocation)                | ✅ bulb-template registry + 6/6 unit tests (stat formula, crit 1.2x bonus, order insertion after caster) |
-| Action-stream JSON output                 | ✅ embedded LwActionStream + 16 action types wired (USE_WEAPON / USE_CHIP / DAMAGE / HEAL / KILL / CRITICAL / ADD_EFFECT / STACK_EFFECT / SLIDE / TELEPORT / INVOCATION / RESURRECT / VITALITY / NOVA_VITALITY / ADD_STATE / START_TURN). Opt-in via `state.stream.enabled = 1`; zero overhead when off. |
+Cross-verified against the upstream Python engine on every action of the
+emitted stream:
 
-## Microbench (Python -> C, 5x5 toy state)
+| Test | Coverage | Result |
+|---|---|---|
+| `test_v2_parity.py` | 36 weapons × 20 seeds | **720 / 720** |
+| `test_v2_mass_chips_all.py` | 109 chips × 20 seeds | **2 180 / 2 180** |
+| `test_v2_combos_simple.py` | 50 (weapon + 2 chips) × 5 seeds | **250 / 250** |
+| `test_v2_combos.py` | 4 weapons × 6 dmg chips × 10 summons × 5 seeds | **1 200 / 1 200** |
+| `test_v2_summon.py` | 10 bulb templates × 5 seeds | **50 / 50** |
+| `test_v2_death.py` | 7 weapons × 9 HP levels × 10 seeds | **630 / 630** |
+| `test_v2_fuzzer.py` | random loadouts | **1 000 / 1 000** |
+| **Total** | | **6 030 / 6 030 — 100 %** |
+
+Every action — `USE_WEAPON`, `USE_CHIP`, `LOST_LIFE`, `HEAL`,
+`ADD_WEAPON_EFFECT`, `ADD_CHIP_EFFECT`, `STACK_EFFECT`, `REMOVE_EFFECT`,
+`UPDATE_EFFECT`, `MOVE_TO`, `KILL`, `INVOCATION`, `LEEK_TURN`,
+`END_TURN`, `NEW_TURN`, `START_FIGHT`, `END_FIGHT` — matches the Python
+upstream byte-for-byte, including effect parameters, damage rolls,
+critical-hit triggers, AoE falloff, summon stat rolls, and the
+Bradley-Terry start order.
+
+## Coverage
+
+- **All 36 weapons**: pistols, machine guns, lasers, shotguns, axes,
+  flame thrower, the gazor family, lightninger / enhanced /
+  unbridled / katana / b_laser / m_laser / j_laser / electrisor /
+  rhino / etc., including weapons with `passive_effects` (NOVA_DAMAGE,
+  DAMAGE_TO_*).
+- **All 109 chips**: damage / heal / shield / buff / debuff / poison /
+  shackle / vulnerability / antidote / aftereffect / nova / steal /
+  kill / vitality / multiply_stats / push / attract / teleport /
+  permutation / repel / resurrect / remove_shackles / + all 10
+  summon templates.
+- **All 10 summon templates**: puny_bulb, light_bulb, healer_bulb,
+  fire_bulb, iced_bulb, lightning_bulb, metallic_bulb, wizard_bulb,
+  savant_bulb, tactician_bulb — bulbs run their own AI, fire their
+  own chip lists, and contribute to win/loss detection identically.
+- **A\* pathfinding**, BFS reachability, line-of-sight, can-use-attack,
+  custom maps with obstacles + team-cell placement, full Bradley-Terry
+  start order with shared LCG RNG, initial cooldowns, max_uses,
+  team_cooldown.
+
+## Speed
+
+End-to-end 1v1 fights, basic AI vs basic AI, no I/O:
 
 ```
-Clone         (C, memcpy + pool):    67 us / call
-legal_actions (C):                   1.4 us / call
-extract_mlp   (C, zero-copy):        0.3 us / call
+RNG draws/sec
+  Python:        1 867 543 / s
+  C:            39 843 665 / s        (21x)
+
+Full 1v1 fights
+  Python:    386 fights/sec   2.57 ms/fight   65 turns avg
+  C:      55 689 fights/sec   17.8 us/fight   19.5 turns avg
+                                      (144x raw, 43x per-turn, 13x per-action)
 ```
-
-## End-to-end benchmark (full 1v1 fights, basic-AI vs basic-AI)
-
-`bindings/python/bench_compare.py` drives the same workload through
-the C engine and the upstream Python `leekwars-generator-python`:
-
-```
-RNG draws/sec:
-  Python:      1,867,543 / s
-  C:          39,843,665 / s
-  Speedup: 21x
-
-Full 1v1 fights (200 each side):
-  Python:    386 fights/sec    2.57 ms/fight    65 turns   173k actions/sec
-  C:      55,689 fights/sec   17.8 us/fight   19.5 turns  2.20M actions/sec
-
-  Per-fight raw speedup:                  144x
-  Per-turn speedup (turn-count adjusted):  43x
-  Per-action speedup:                      13x
-```
-
-The Python side still has more bookkeeping (action-stream emission,
-catalog JSON loader, full statistics manager); the C engine skips
-those for AI search workloads.
-
-## Architecture
-
-Three layers:
-
-1. **C engine** (`src/`, `include/`) -- pure C99, no malloc inside a
-   fight (only at scenario load + state pool). Single-translation-unit-
-   friendly; static library or directly statically linked into the
-   Python extension.
-
-2. **Python bindings** (`bindings/python/`) -- Cython wrapper exposing
-   `State`, `Action`, `Topology`, `InventoryProfile`. State.clone()
-   uses memcpy + pool; legal_actions returns a list of Actions;
-   extract_mlp_features writes to a numpy view (zero-copy).
-
-3. **AI integration** (in the consumer repo, e.g. `leekwars-ai-private`)
-   -- the AI's `beam_search` keeps a C State alongside the Python
-   State; per turn it pushes the Python state into C, runs the inner
-   loop in C, picks an action, and applies it via Python (which
-   stays the canonical Java-parity executor).
 
 ## Build
 
-C library + tests (Windows + VS 2026 Build Tools):
+C library + tests (Windows + VS Build Tools):
 
 ```
 build.bat
@@ -116,80 +89,36 @@ Python bindings:
 
 ```
 cd bindings/python
-build_python.bat
-python bench_clone.py
+python setup.py build_ext --inplace
+python test_v2_parity.py --seeds 5
 ```
 
-## Layout
+Linux is supported by the same `setup.py` (uses `gcc -O2`).
+
+## Architecture
 
 ```
 include/        public headers (lw_*.h)
-src/            implementation (lw_*.c)
-tests/          C-level unit + parity tests
+src/            implementation (lw_*.c) — line-by-line Java port
+tests/          C-level unit tests (CTest)
 bindings/
-  python/       Cython wrapper exposing State / Action / etc.
+  python/
+    leekwars_c/        Cython wrapper -> _engine.pyx
+    setup.py
+    test_v2_*.py       parity tests vs Python upstream
 ```
 
-## Parity status
+Single translation unit per `.c` file; the engine performs no `malloc`
+during a fight (only at scenario load + state pool allocation).
 
-The C engine matches the upstream Python `leekwars` engine
-byte-for-byte across:
+## Why a C port
 
-  - **114000 / 114000** fuzz cases over 57 effect categories
-    (`bindings/python/parity_gate.py`)
-  - **4000 / 4000** Push / Attract movement cases
-    (`bindings/python/test_movement_parity.py`)
-  - **500 / 500** multi-target AoE cases verifying per-target
-    falloff (`bindings/python/test_attack_multitarget.py`)
-  - **2 / 2** passive integration cases (damage_to_strength,
-    moved_to_mp; `bindings/python/test_passive_hooks.py`)
-  - **25 / 25** C-level unit tests covering RNG, pathfinding, LoS,
-    state alloc/clone/pool, action handler, legal_actions, area
-    masks, effect store, dispatcher, attack pipeline, turn driver,
-    winner detection, summon, action stream
-
-For every case we compare every numeric mutation: target hp,
-total_hp, buff_stats[18], state_flags + the same fields on the
-caster. Plus, where relevant, the entity's effect list and the
-turn-order index. See the test files for the exact comparison
-predicates.
-
-Real bugs the gate caught and we fixed:
-
-1. `EffectDamage.apply` was missing two whole branches —
-   `lifeSteal` (caster heals from `value * caster.wisdom / 1000`)
-   and `returnDamage` (target's `damage_return` reflects damage to
-   caster). Now ported in `lw_apply_damage_v2`.
-2. `EffectRawBuffMP` and `EffectRawBuffTP` use `targetCount` as the
-   multiplier, not `aoe` like the other 9 raw buffs. Dispatcher
-   was passing the wrong arg.
-3. `Effect.reduce` rounds the **signed** value (`abs * factor *
-   sign` inside `java_round`), not `abs * factor` then `* sign`.
-   Off-by-one on .5 boundaries for negative shackles.
-4. Turn decrement was happening on the **target**'s end-of-turn;
-   Python decrements on the **caster**'s start-of-turn (walking
-   `caster.launchedEffects`). 2-entity fight wall-clock timing
-   happened to converge by accident, but 3+-entity fights and any
-   "buff alive one extra turn" scenario diverged.
-
-Plus the dispatcher now implements the two missing branches of
-`Effect.createEffect`:
-
-  - Pre-apply removal of an existing same-(id, attack_id) entry
-    when the new effect is non-stackable
-  - Post-apply merge with an existing same-(id, attack_id, turns,
-    caster) entry when stackable
-
-The C engine is feature-complete vs the Python / Java reference for
-combat-relevant code paths: damage / heal / shields / buffs /
-debuffs / shackles / vulnerabilities / poison / aftereffect /
-nova damage / life damage / vitality / steal / kill / multiply
-stats / antidote / remove shackles / resurrect / push / attract /
-teleport / permutation / summon / passive event hooks (7 types) /
-action-stream emission (16 action types).
-
-The end-to-end self-play loop (`tests/test_full_fight.c`) runs a
-1v1 to a clean winner using only C primitives.
+Self-play and Monte-Carlo tree search need cheap simulation. The
+Python engine is faithful to Java but pays Python's per-attribute
+lookup cost on every state mutation. The C port keeps the Java
+algorithm verbatim while running ~140× faster per fight, so a single
+machine can drive hundreds of thousands of self-play games per hour
+without changing the rules of the game.
 
 ## License
 

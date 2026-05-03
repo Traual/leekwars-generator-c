@@ -9,7 +9,7 @@ import os
 import sys
 from collections import Counter
 
-import leekwars_c_v2._engine as _v2
+import leekwars_c._engine as _v2
 
 PY_DIR = "C:/Users/aurel/Desktop/leekwars_generator_python"
 if PY_DIR not in sys.path:

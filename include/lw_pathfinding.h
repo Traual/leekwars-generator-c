@@ -1,55 +1,87 @@
 /*
- * lw_pathfinding.h -- A* and BFS-bounded reachability.
+ * lw_pathfinding.h -- 1:1 port of maps/Pathfinding.java
  *
- * The Python engine's A* (leekwars/maps/map.py:getAStarPath) uses
- * LIFO tie-breaking to match Java's TreeSet-with-always-negative
- * comparator behaviour. We replicate that here with a decreasing
- * counter as the secondary heap key.
+ * The Java class is a bag of public static helper methods (no instance
+ * state). We port each as a free function lw_pathfinding_xxx(...).
  *
- * BFS-bounded is what AI move enumeration uses: from a start cell,
- * find every walkable+unoccupied cell reachable in <= max_dist
- * steps, with the path back to start. Replaces ~600 A* calls per
- * AI turn with one BFS.
+ * The direction constants (NORTH/EAST/SOUTH/WEST = 0/1/2/3) are
+ * already declared in lw_constants.h as LW_DIR_NORTH/EAST/SOUTH/WEST,
+ * so they are not redeclared here.
+ *
+ * NOTE: Pathfinding.java contains a large commented-out A*
+ * implementation (`getOldAStarPath`) plus a private inner class
+ * `Node` only referenced by that dead block. The Node mirror lives
+ * in lw_pathfinding.c (private static struct) so the C source order
+ * matches the Java source order; it is intentionally not exposed.
+ *
+ * Dependencies:
+ *   - lw_cell.h  : LwCell struct and getX/getY
+ *   - struct LwMap is forward-declared but unused by the live methods
+ *     (the commented-out A* would have needed Map.getCellByDir etc.).
+ *
+ * Reference: java_reference/src/main/java/com/leekwars/generator/maps/Pathfinding.java
  */
 #ifndef LW_PATHFINDING_H
 #define LW_PATHFINDING_H
 
-#include "lw_types.h"
-#include "lw_map.h"
+#include "lw_cell.h"
 
-/*
- * A* shortest path from start_id to end_id.
- * - Returns path length (excluding start, including end), 0 if no path.
- * - out_path receives the cell ids in the order to walk (start excluded,
- *   end included). Sized at least LW_MAX_PATH_LEN.
- * - entity_at_cell != -1 cells are blocked, EXCEPT the end cell which
- *   is allowed.
- *
- * Returns 0 on no-path / invalid input.
- */
-int lw_astar_path(const LwMap *map,
-                  int start_id,
-                  int end_id,
-                  int *out_path,
-                  int out_path_capacity);
+/* Forward decl -- Map.java is being ported in parallel. None of the
+ * live Pathfinding methods touch Map directly; the commented-out
+ * A* would. Keep the forward decl here so future re-enablement is a
+ * one-line change. */
+struct LwMap;
 
-/*
- * BFS-bounded reachability. Yields every walkable + unoccupied cell
- * reachable in [1, max_dist] steps from start_id, with its path.
- *
- * out_dest_ids[i]   -- cell id of the i-th destination
- * out_paths[i][k]   -- k-th cell on the path to dest i (start excluded)
- * out_path_lens[i]  -- length of path i
- *
- * Returns the number of destinations written (capped at max_dests).
- * Zero if start_id invalid or max_dist <= 0.
+
+/* public static boolean inLine(Cell c1, Cell c2) {
+ *     return c1.getX() == c2.getX() || c1.getY() == c2.getY();
+ * }
  */
-int lw_bfs_reachable(const LwMap *map,
-                     int start_id,
-                     int max_dist,
-                     int *out_dest_ids,
-                     int (*out_paths)[LW_MAX_PATH_LEN],
-                     int *out_path_lens,
-                     int max_dests);
+int lw_pathfinding_in_line(const LwCell *c1, const LwCell *c2);
+
+
+/* public static int getAverageDistance2(Cell c1, List<Cell> cells) {
+ *     int dist = 0;
+ *     for (Cell c2 : cells) {
+ *         dist += (c1.getX() - c2.getX()) * (c1.getX() - c2.getX())
+ *               + (c1.getY() - c2.getY()) * (c1.getY() - c2.getY());
+ *     }
+ *     return dist / cells.size();
+ * }
+ *
+ * NOTE: Java List<Cell> -> (const LwCell **cells, int n_cells). The
+ * caller owns the array of pointers. Behaviour for n_cells == 0
+ * matches Java: it would throw ArithmeticException; here we return 0
+ * defensively (no callers reach this with an empty list in the engine).
+ */
+int lw_pathfinding_get_average_distance2(const LwCell *c1,
+                                          const LwCell *const *cells,
+                                          int n_cells);
+
+
+/* public static int getCaseDistance(Cell c1, Cell c2) {
+ *     return Math.abs(c1.getX() - c2.getX()) + Math.abs(c1.getY() - c2.getY());
+ * }
+ */
+int lw_pathfinding_get_case_distance(const LwCell *c1, const LwCell *c2);
+
+
+/* public static int getCaseDistance(Cell c1, List<Cell> cells) {
+ *     int dist = -1;
+ *     for (Cell c2 : cells) {
+ *         int d = Math.abs(c1.getX() - c2.getX()) + Math.abs(c1.getY() - c2.getY());
+ *         if (dist == -1 || d < dist)
+ *             dist = d;
+ *     }
+ *     return dist;
+ * }
+ *
+ * NOTE: Java overload disambiguated by suffix _to_list. Returns -1 if
+ * cells is empty (matches Java's initial dist=-1 with no iterations).
+ */
+int lw_pathfinding_get_case_distance_to_list(const LwCell *c1,
+                                              const LwCell *const *cells,
+                                              int n_cells);
+
 
 #endif /* LW_PATHFINDING_H */

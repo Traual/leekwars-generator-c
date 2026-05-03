@@ -1,21 +1,18 @@
-"""V2 mass chip sweep across ALL 109 chips. AI picks the right target
-based on chip range (self if min_range=0, enemy cell otherwise).
+"""V2 combos parity: weapon + damage chip + summon chip simultaneous,
+across multiple seeds and loadouts. Tests that complex action stream
+interactions stay byte-identical between v2 and Python upstream.
 """
 from __future__ import annotations
-import argparse, json, os, sys
+import argparse, json, os, sys, random
 import leekwars_c._engine as _v2
 
 PY_DIR = "C:/Users/aurel/Desktop/leekwars_generator_python"
 if PY_DIR not in sys.path: sys.path.insert(0, PY_DIR)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import test_v2_chip as base
+import test_v2_summon as base
 
 
-def run_v2_smart(seed, weapon_id, chip_id, a_cell, b_cell):
-    """Same as base.run_v2 but the AI picks an appropriate target cell:
-       - if chip min_range=0 -> cast on self
-       - else -> cast on the enemy's cell
-    """
+def run_v2_combo(seed, weapon_id, dmg_chip_id, summon_chip_id):
     eng = _v2.Engine()
     raw = base.WEAPONS[weapon_id]
     eng.add_weapon(item_id=weapon_id, name=raw["name"], cost=int(raw["cost"]),
@@ -24,59 +21,57 @@ def run_v2_smart(seed, weapon_id, chip_id, a_cell, b_cell):
                     los=bool(raw.get("los", True)), max_uses=int(raw.get("max_uses", -1)),
                     effects=[(int(e["id"]), float(e["value1"]), float(e["value2"]),
                               int(e["turns"]), int(e["targets"]), int(e["modifiers"]))
-                             for e in raw["effects"]])
-    chip = base.CHIPS[chip_id]
-    eng.add_chip(item_id=chip_id, name=chip["name"], cost=int(chip["cost"]),
-                  min_range=int(chip["min_range"]), max_range=int(chip["max_range"]),
-                  launch_type=int(chip["launch_type"]), area_id=int(chip.get("area", 1)),
-                  los=bool(chip.get("los", True)), max_uses=int(chip.get("max_uses", -1)),
-                  cooldown=int(chip.get("cooldown", 0)),
-                  initial_cooldown=int(chip.get("initial_cooldown", 0)),
-                  team_cooldown=bool(chip.get("team_cooldown", False)),
-                  level=int(chip.get("level", 1)),
-                  chip_type=int(chip.get("type", 0)),
-                  template_id=int(chip.get("template", 0)),
-                  effects=[(int(e["id"]), float(e["value1"]), float(e["value2"]),
-                            int(e["turns"]), int(e["targets"]), int(e["modifiers"]))
-                           for e in chip["effects"]])
+                             for e in raw["effects"]],
+                    passive_effects=[(int(e["id"]), float(e["value1"]),
+                                       float(e["value2"]), int(e["turns"]),
+                                       int(e["targets"]), int(e["modifiers"]))
+                                      for e in raw.get("passive_effects", [])])
+    base.register_all_chips_v2(eng)
+    base.register_summon_templates_v2(eng)
     eng.add_farmer(1, "A", "fr"); eng.add_farmer(2, "B", "fr")
     eng.add_team(1, "T1"); eng.add_team(2, "T2")
     eng.add_entity(team=0, fid=1, name="A", level=100,
                    life=2500, tp=14, mp=6, strength=200, agility=0,
                    frequency=100, wisdom=0, resistance=0, science=0,
                    magic=0, cores=10, ram=10,
-                   farmer=1, team_id=1, weapons=[weapon_id], chips=[chip_id], cell=a_cell)
+                   farmer=1, team_id=1, weapons=[weapon_id],
+                   chips=[dmg_chip_id, summon_chip_id], cell=72)
     eng.add_entity(team=1, fid=2, name="B", level=100,
                    life=2500, tp=14, mp=6, strength=200, agility=0,
                    frequency=100, wisdom=0, resistance=0, science=0,
                    magic=0, cores=10, ram=10,
-                   farmer=2, team_id=2, weapons=[weapon_id], chips=[chip_id], cell=b_cell)
-    eng.set_seed(seed); eng.set_max_turns(30)
-    eng.set_custom_map(obstacles={}, team1=[a_cell], team2=[b_cell])
-
-    chip_min_range = int(chip["min_range"])
+                   farmer=2, team_id=2, weapons=[weapon_id],
+                   chips=[dmg_chip_id, summon_chip_id], cell=144)
+    eng.set_seed(seed); eng.set_max_turns(20)
+    eng.set_custom_map(obstacles={}, team1=[72], team2=[144])
 
     def my_ai(idx, turn):
-        ops = 0
-        my_cell = eng.entity_cell(idx)
         n = eng.n_entities()
         my_team = eng.entity_team(idx)
-        target = None
+        my_cell = eng.entity_cell(idx)
+        target = None; best_dist = 10**9
         for i in range(n):
-            if i != idx and eng.entity_alive(i) and eng.entity_team(i) != my_team:
-                target = i; break
-        target_cell = eng.entity_cell(target) if target is not None else my_cell
-        chip_cell = my_cell if chip_min_range == 0 else target_cell
-        rc = eng.use_chip(idx, chip_id, chip_cell)
+            if i == idx or not eng.entity_alive(i): continue
+            if eng.entity_team(i) == my_team: continue
+            d = eng.cell_distance2(my_cell, eng.entity_cell(i))
+            if d < best_dist: best_dist = d; target = i
+        if target is None: return 0
+        target_cell = eng.entity_cell(target)
+        ops = 0
+        # Turn 1 entity 0: summon
+        if turn == 1 and idx == 0:
+            for delta in (1, -1, 18, -18):
+                summon_cell = my_cell + delta
+                if 0 <= summon_cell < 700:
+                    rc = eng.use_chip(idx, summon_chip_id, summon_cell)
+                    if rc > 0: ops += 1; break
+        # Damage chip on enemy (range > 0)
+        rc = eng.use_chip(idx, dmg_chip_id, target_cell)
         if rc > 0: ops += 1
-        if target is None: return ops
-        # Mirror py weapon_class.useWeapon: refuse to fire at dead target.
+        # Fire weapon
         if not eng.entity_alive(target): return ops
         for _ in range(8):
             if not eng.entity_alive(target): break
-            # Refresh target cell each time -- chips like inversion swap
-            # positions between casts, py's AI uses the entity's current
-            # cell each shot.
             target_cell = eng.entity_cell(target)
             rc = eng.fire_weapon(idx, weapon_id, target_cell)
             if rc <= 0: break
@@ -88,7 +83,7 @@ def run_v2_smart(seed, weapon_id, chip_id, a_cell, b_cell):
     return eng.stream_dump(), eng.winner
 
 
-def run_py_smart(seed, weapon_id, chip_id, a_cell, b_cell):
+def run_py_combo(seed, weapon_id, dmg_chip_id, summon_chip_id):
     from leekwars.generator import Generator
     from leekwars.statistics.statistics_manager import DefaultStatisticsManager
     from leekwars.scenario.scenario import Scenario
@@ -98,8 +93,6 @@ def run_py_smart(seed, weapon_id, chip_id, a_cell, b_cell):
     from leekwars.state.state import State as PyState
     from leekwars.weapons import weapons as PyWeapons
     from leekwars.classes import weapon_class, chip_class, fight_class
-
-    chip_min_range = int(base.CHIPS[chip_id]["min_range"])
 
     class _NoStats(DefaultStatisticsManager):
         def setGeneratorFight(self, fight): pass
@@ -115,33 +108,33 @@ def run_py_smart(seed, weapon_id, chip_id, a_cell, b_cell):
                 if w is None: return
                 me.setWeapon(w)
             enemy_id = fight_class.getNearestEnemy(ai)
-            if enemy_id < 0:
-                target_cell_id = me.getCell().getId()
-            else:
-                enemy = ai.getFight().getEntity(enemy_id)
-                target_cell_id = enemy.getCell().getId()
-            chip_cell_id = me.getCell().getId() if chip_min_range == 0 else target_cell_id
-            try:
-                chip_class.useChipOnCell(ai, chip_id, chip_cell_id)
-            except Exception:
-                pass
             if enemy_id < 0: return
             enemy = ai.getFight().getEntity(enemy_id)
+            turn = ai.getFight().getState().getOrder().getTurn()
+            if turn == 1 and me.getFId() == 0:
+                for delta in (1, -1, 18, -18):
+                    try:
+                        chip_class.useChipOnCell(ai, summon_chip_id, me.getCell().getId() + delta)
+                        break
+                    except Exception:
+                        pass
+            try:
+                chip_class.useChipOnCell(ai, dmg_chip_id, enemy.getCell().getId())
+            except Exception: pass
             for _ in range(8):
                 w = me.getWeapon()
                 if w is None or me.getTP() < w.getCost(): break
                 if not ai.getState().getMap().canUseAttack(me.getCell(), enemy.getCell(), w.getAttack()): break
                 try:
                     r = weapon_class.useWeapon(ai, enemy_id)
-                except Exception:
-                    break
+                except Exception: break
                 if r <= 0 or enemy.isDead() or me.isDead(): break
 
     sc = Scenario()
-    sc.seed = seed; sc.maxTurns = 30
+    sc.seed = seed; sc.maxTurns = 20
     sc.type = PyState.TYPE_SOLO
     sc.context = PyState.CONTEXT_TEST
-    sc.map = {"id": 0, "obstacles": {}, "team1": [a_cell], "team2": [b_cell]}
+    sc.map = {"id": 0, "obstacles": {}, "team1": [72], "team2": [144]}
     f1 = FarmerInfo(); f1.id = 1; f1.name = "A"; f1.country = "fr"
     f2 = FarmerInfo(); f2.id = 2; f2.name = "B"; f2.country = "fr"
     sc.farmers[1] = f1; sc.farmers[2] = f2
@@ -149,7 +142,7 @@ def run_py_smart(seed, weapon_id, chip_id, a_cell, b_cell):
     t2 = TeamInfo(); t2.id = 2; t2.name = "T2"
     sc.teams[1] = t1; sc.teams[2] = t2
 
-    def mk(eid, fid, name):
+    def mk(eid, fid, name, chips):
         e = EntityInfo()
         e.id = eid; e.name = name; e.type = 0
         e.farmer = fid; e.team = fid
@@ -158,11 +151,11 @@ def run_py_smart(seed, weapon_id, chip_id, a_cell, b_cell):
         e.wisdom = 0; e.resistance = 0; e.science = 0; e.magic = 0
         e.frequency = 100; e.cores = 10; e.ram = 10
         e.tp = 14; e.mp = 6
-        e.weapons = [weapon_id]; e.chips = [chip_id]
+        e.weapons = [weapon_id]; e.chips = chips
         e.ai_function = ScriptedAgent()
         return e
-    sc.addEntity(0, mk(1, 1, "A"))
-    sc.addEntity(1, mk(2, 2, "B"))
+    sc.addEntity(0, mk(1, 1, "A", [dmg_chip_id, summon_chip_id]))
+    sc.addEntity(1, mk(2, 2, "B", [dmg_chip_id, summon_chip_id]))
     g = Generator()
     out = g.runScenario(sc, None, _NoReg(), _NoStats())
     actions = []
@@ -172,41 +165,53 @@ def run_py_smart(seed, weapon_id, chip_id, a_cell, b_cell):
     return actions, out.winner
 
 
+def diff(a, b):
+    n = min(len(a), len(b)); f = -1
+    for i in range(n):
+        if a[i] != b[i]: f = i; break
+    if f == -1 and len(a) != len(b): f = n
+    return f, len(a), len(b), (a[f] if 0 <= f < len(a) else None), (b[f] if 0 <= f < len(b) else None)
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--seeds", type=int, default=5)
+    p.add_argument("--seeds", type=int, default=10)
     args = p.parse_args()
 
-    chips_by_id = base.CHIPS
-    candidates = sorted(chips_by_id.keys())
+    weapons = [37, 38, 42, 47]  # pistol/machine_gun/laser/m_laser
+    dmg_chips = [5, 7, 31, 33, 36, 416]  # flame/rock/iceberg/lightning/meteorite/thunder
+    summon_chips = [73, 74, 75, 76, 77, 78, 79, 142, 166, 167]
 
-    print(f"Mass chip sweep: ALL {len(candidates)} chips x {args.seeds} seeds\n")
+    print(f"Combos parity: {len(weapons)} weapons x {len(dmg_chips)} dmg chips x {len(summon_chips)} summons "
+          f"x {args.seeds} seeds = {len(weapons)*len(dmg_chips)*len(summon_chips)*args.seeds} trials\n")
+
     n_pass = 0; n_total = 0; failures = []
-    for cid in candidates:
-        chip = chips_by_id[cid]
+    rng = random.Random(0)
+    combos = [(w, d, s) for w in weapons for d in dmg_chips for s in summon_chips]
+    rng.shuffle(combos)
+    for (w, d, s) in combos:
         n_ok = 0
-        for s in range(1, args.seeds + 1):
+        for sd in range(1, args.seeds + 1):
             try:
-                v_stream, vw = run_v2_smart(s, 37, cid, 72, 144)
-                p_stream, pw = run_py_smart(s, 37, cid, 72, 144)
-            except Exception as ex:
+                v_stream, vw = run_v2_combo(sd, w, d, s)
+                p_stream, pw = run_py_combo(sd, w, d, s)
+            except Exception:
                 continue
             vn = base.normalize(v_stream, "v2"); pn = base.normalize(p_stream, "py")
-            f, an, bn, av, pv = base.diff(vn, pn)
+            f, an, bn, av, pv = diff(vn, pn)
             if f == -1:
                 n_ok += 1
             else:
-                if len(failures) < 5:
-                    failures.append((cid, chip["name"], s, f, av, pv))
+                if len(failures) < 3:
+                    failures.append((w, d, s, sd, f, av, pv))
         n_total += args.seeds
         n_pass += n_ok
-        status = "OK" if n_ok == args.seeds else f"{n_ok}/{args.seeds}"
-        rng = chip["min_range"]
-        print(f"  chip {cid:>4} ({chip['name']:<28}) rng={rng}: {status}")
+        if n_ok != args.seeds:
+            print(f"  W={w} D={d} S={s}: {n_ok}/{args.seeds}")
 
     print(f"\nTOTAL: {n_pass}/{n_total} byte-identical ({100*n_pass//max(1,n_total)}%)")
-    for cid, name, seed, idx, av, pv in failures:
-        print(f"  chip {cid} ({name}) seed {seed} @ idx {idx}")
+    for w, d, s, sd, f, av, pv in failures:
+        print(f"  W={w} D={d} S={s} seed={sd} @ idx {f}")
         print(f"    v2: {av}")
         print(f"    py: {pv}")
 

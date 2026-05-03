@@ -1,4 +1,4 @@
-"""V2 parity test: leekwars_c_v2 (ligne-par-ligne port from Java) vs
+"""V2 parity test: leekwars_c (ligne-par-ligne port from Java) vs
 the Python upstream engine.
 
 Mirrors the v1 test_action_stream_strict.py methodology:
@@ -17,7 +17,7 @@ import os
 import sys
 from collections import Counter
 
-import leekwars_c_v2._engine as _v2
+import leekwars_c._engine as _v2
 
 # Make the Python upstream importable
 PY_DIR = "C:/Users/aurel/Desktop/leekwars_generator_python"
@@ -81,7 +81,11 @@ def run_v2(seed: int, weapon_id: int, a_cell: int, b_cell: int,
                     effects=[(int(e["id"]), float(e["value1"]),
                               float(e["value2"]), int(e["turns"]),
                               int(e["targets"]), int(e["modifiers"]))
-                             for e in raw["effects"]])
+                             for e in raw["effects"]],
+                    passive_effects=[(int(e["id"]), float(e["value1"]),
+                                       float(e["value2"]), int(e["turns"]),
+                                       int(e["targets"]), int(e["modifiers"]))
+                                      for e in raw.get("passive_effects", [])])
     eng.add_farmer(1, "A", "fr"); eng.add_farmer(2, "B", "fr")
     eng.add_team(1, "T1"); eng.add_team(2, "T2")
     eng.add_entity(team=0, fid=1, name="A", level=100,

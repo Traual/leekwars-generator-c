@@ -1,101 +1,75 @@
-"""V2 movement parity: AI moves toward enemy then fires.
-Verifies MOVE_TO action stream + new positions match Java/Python."""
+"""V2 death scenarios parity:
+  - Low HP entities killed in 1-2 shots
+  - Multi-entity dying via AoE in same turn
+  - Reflective damage killing the caster
+  - Mutual kill (caster dies from return damage same turn)
+"""
 from __future__ import annotations
 import argparse, json, os, sys
 import leekwars_c._engine as _v2
 
 PY_DIR = "C:/Users/aurel/Desktop/leekwars_generator_python"
 if PY_DIR not in sys.path: sys.path.insert(0, PY_DIR)
-
-PY_ACT = {
-    "START_FIGHT": 0, "END_FIGHT": 4, "PLAYER_DEAD": 5, "NEW_TURN": 6,
-    "LEEK_TURN": 7, "END_TURN": 8, "MOVE_TO": 10, "KILL": 11, "USE_CHIP": 12,
-    "USE_WEAPON": 16,
-    "LOST_LIFE": 101, "HEAL": 103,
-    "ADD_WEAPON_EFFECT": 301, "ADD_CHIP_EFFECT": 302, "REMOVE_EFFECT": 303,
-    "ERROR": 1000, "MAP": 1001, "AI_ERROR": 1002,
-}
-ID_TO_NAME = {v: k for k, v in PY_ACT.items()}
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import test_v2_parity as base
 
 
-def normalize(stream, source):
-    out = []
-    for e in stream:
-        if source == "v2":
-            t, args = e["type"], e["args"]
-            extra = e.get("extra", [])
-            if extra: args = args + extra
-        else:
-            if not isinstance(e, list) or not e: continue
-            t = e[0]; args = e[1:]
-            # Flatten any nested lists (e.g. MOVE_TO path)
-            flat = []
-            for a in args:
-                if isinstance(a, list):
-                    flat.extend(a)
-                else:
-                    flat.append(a)
-            args = flat
-        name = ID_TO_NAME.get(t)
-        if name is None or name in ("MAP", "SAY", "SHOW_CELL", "LAMA", "AI_ERROR", "ERROR"): continue
-        out.append((name, tuple(args)))
-    return out
-
-
-WEAPONS = {int(s["item"]): s for s in json.load(open(os.path.join(PY_DIR, "data", "weapons.json"))).values()}
-
-
-def run_v2(seed, weapon_id, a_cell, b_cell, agility=0):
+def run_v2_low_hp(seed, weapon_id, hp):
+    """1v1 with low HP entities -- die in 1-2 shots."""
     eng = _v2.Engine()
-    raw = WEAPONS[weapon_id]
+    raw = base.WEAPONS_JSON_BY_ITEM[weapon_id]
     eng.add_weapon(item_id=weapon_id, name=raw["name"], cost=int(raw["cost"]),
                     min_range=int(raw["min_range"]), max_range=int(raw["max_range"]),
                     launch_type=int(raw["launch_type"]), area_id=int(raw["area"]),
                     los=bool(raw.get("los", True)), max_uses=int(raw.get("max_uses", -1)),
                     effects=[(int(e["id"]), float(e["value1"]), float(e["value2"]),
                               int(e["turns"]), int(e["targets"]), int(e["modifiers"]))
-                             for e in raw["effects"]])
+                             for e in raw["effects"]],
+                    passive_effects=[(int(e["id"]), float(e["value1"]), float(e["value2"]),
+                                       int(e["turns"]), int(e["targets"]), int(e["modifiers"]))
+                                      for e in raw.get("passive_effects", [])])
     eng.add_farmer(1, "A", "fr"); eng.add_farmer(2, "B", "fr")
     eng.add_team(1, "T1"); eng.add_team(2, "T2")
     eng.add_entity(team=0, fid=1, name="A", level=100,
-                   life=2500, tp=14, mp=6, strength=200, agility=agility,
+                   life=hp, tp=14, mp=6, strength=200, agility=0,
                    frequency=100, wisdom=0, resistance=0, science=0,
                    magic=0, cores=10, ram=10,
-                   farmer=1, team_id=1, weapons=[weapon_id], cell=a_cell)
+                   farmer=1, team_id=1, weapons=[weapon_id], cell=72)
     eng.add_entity(team=1, fid=2, name="B", level=100,
-                   life=2500, tp=14, mp=6, strength=200, agility=agility,
+                   life=hp, tp=14, mp=6, strength=200, agility=0,
                    frequency=100, wisdom=0, resistance=0, science=0,
                    magic=0, cores=10, ram=10,
-                   farmer=2, team_id=2, weapons=[weapon_id], cell=b_cell)
+                   farmer=2, team_id=2, weapons=[weapon_id], cell=144)
     eng.set_seed(seed); eng.set_max_turns(30)
-    eng.set_custom_map(obstacles={}, team1=[a_cell], team2=[b_cell])
+    eng.set_custom_map(obstacles={}, team1=[72], team2=[144])
 
     def my_ai(idx, turn):
         n = eng.n_entities()
         my_team = eng.entity_team(idx)
-        target = None
+        my_cell = eng.entity_cell(idx)
+        target = None; bd = 10**9
         for i in range(n):
-            if i != idx and eng.entity_alive(i) and eng.entity_team(i) != my_team:
-                target = i; break
+            if i == idx or not eng.entity_alive(i): continue
+            if eng.entity_team(i) == my_team: continue
+            d = eng.cell_distance2(my_cell, eng.entity_cell(i))
+            if d < bd: bd = d; target = i
         if target is None: return 0
         target_cell = eng.entity_cell(target)
-        # Move toward enemy first
-        eng.move_toward(idx, target_cell, 6)
-        # Then fire
-        fired = 0
+        ops = 0
         for _ in range(8):
+            if not eng.entity_alive(target): break
+            target_cell = eng.entity_cell(target)
             rc = eng.fire_weapon(idx, weapon_id, target_cell)
             if rc <= 0: break
-            fired += 1
-            if not eng.entity_alive(target): break
-        return fired
+            ops += 1
+        return ops
 
     eng.set_ai_callback(my_ai)
     eng.run()
     return eng.stream_dump(), eng.winner
 
 
-def run_py(seed, weapon_id, a_cell, b_cell, agility=0):
+def run_py_low_hp(seed, weapon_id, hp):
     from leekwars.generator import Generator
     from leekwars.statistics.statistics_manager import DefaultStatisticsManager
     from leekwars.scenario.scenario import Scenario
@@ -122,27 +96,20 @@ def run_py(seed, weapon_id, a_cell, b_cell, agility=0):
             enemy_id = fight_class.getNearestEnemy(ai)
             if enemy_id < 0: return
             enemy = ai.getFight().getEntity(enemy_id)
-            # Move toward enemy first
-            try:
-                ai.getState().moveTowardCell(me, enemy.getCell().getId(), 6)
-            except Exception:
-                pass
-            # Fire
             for _ in range(8):
                 w = me.getWeapon()
                 if w is None or me.getTP() < w.getCost(): break
                 if not ai.getState().getMap().canUseAttack(me.getCell(), enemy.getCell(), w.getAttack()): break
                 try:
                     r = weapon_class.useWeapon(ai, enemy_id)
-                except Exception:
-                    break
+                except Exception: break
                 if r <= 0 or enemy.isDead() or me.isDead(): break
 
     sc = Scenario()
     sc.seed = seed; sc.maxTurns = 30
     sc.type = PyState.TYPE_SOLO
     sc.context = PyState.CONTEXT_TEST
-    sc.map = {"id": 0, "obstacles": {}, "team1": [a_cell], "team2": [b_cell]}
+    sc.map = {"id": 0, "obstacles": {}, "team1": [72], "team2": [144]}
     f1 = FarmerInfo(); f1.id = 1; f1.name = "A"; f1.country = "fr"
     f2 = FarmerInfo(); f2.id = 2; f2.name = "B"; f2.country = "fr"
     sc.farmers[1] = f1; sc.farmers[2] = f2
@@ -154,8 +121,8 @@ def run_py(seed, weapon_id, a_cell, b_cell, agility=0):
         e = EntityInfo()
         e.id = eid; e.name = name; e.type = 0
         e.farmer = fid; e.team = fid
-        e.level = 100; e.life = 2500
-        e.strength = 200; e.agility = agility
+        e.level = 100; e.life = hp
+        e.strength = 200; e.agility = 0
         e.wisdom = 0; e.resistance = 0; e.science = 0; e.magic = 0
         e.frequency = 100; e.cores = 10; e.ram = 10
         e.tp = 14; e.mp = 6
@@ -164,7 +131,6 @@ def run_py(seed, weapon_id, a_cell, b_cell, agility=0):
         return e
     sc.addEntity(0, mk(1, 1, "A"))
     sc.addEntity(1, mk(2, 2, "B"))
-
     g = Generator()
     out = g.runScenario(sc, None, _NoReg(), _NoStats())
     actions = []
@@ -175,11 +141,9 @@ def run_py(seed, weapon_id, a_cell, b_cell, agility=0):
 
 
 def diff(a, b):
-    n = min(len(a), len(b))
-    f = -1
+    n = min(len(a), len(b)); f = -1
     for i in range(n):
-        if a[i] != b[i]:
-            f = i; break
+        if a[i] != b[i]: f = i; break
     if f == -1 and len(a) != len(b): f = n
     return f, len(a), len(b), (a[f] if 0 <= f < len(a) else None), (b[f] if 0 <= f < len(b) else None)
 
@@ -187,42 +151,39 @@ def diff(a, b):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--seeds", type=int, default=20)
-    p.add_argument("--weapon", type=int, default=37)
-    p.add_argument("--a-cell", type=int, default=72)
-    p.add_argument("--b-cell", type=int, default=234)  # far away so movement matters
-    p.add_argument("--verbose", action="store_true")
     args = p.parse_args()
 
-    print(f"V2 movement parity: weapon {args.weapon}, A={args.a_cell} B={args.b_cell}, "
-          f"{args.seeds} seeds\n")
+    # Various HP levels: dies in 1, 2, 3, 5 shots; very low; very high; tied at boundary
+    hp_levels = [10, 30, 50, 100, 150, 200, 250, 500, 1000]
+    weapons = [37, 38, 42, 43, 47, 408, 409]
+    print(f"Death scenarios: {len(weapons)} weapons x {len(hp_levels)} hp x {args.seeds} seeds = {len(weapons)*len(hp_levels)*args.seeds} trials\n")
 
-    n_ok = 0; failures = []
-    for s in range(1, args.seeds + 1):
-        try:
-            v_stream, vw = run_v2(s, args.weapon, args.a_cell, args.b_cell)
-            p_stream, pw = run_py(s, args.weapon, args.a_cell, args.b_cell)
-        except Exception as ex:
-            print(f"  seed {s}: ERR {type(ex).__name__}: {ex}")
-            if args.verbose:
-                import traceback; traceback.print_exc()
-            continue
-        vn = normalize(v_stream, "v2"); pn = normalize(p_stream, "py")
-        f, an, bn, av, pv = diff(vn, pn)
-        if f == -1:
-            n_ok += 1
-            if args.verbose:
-                print(f"  seed {s:>3}: OK n={an}")
-        else:
-            if len(failures) < 3:
-                failures.append((s, f, an, bn, av, pv))
-            if args.verbose:
-                print(f"  seed {s:>3}: DIVERGE @ {f}")
+    n_pass = 0; n_total = 0; failures = []
+    for w in weapons:
+        for hp in hp_levels:
+            n_ok = 0
+            for sd in range(1, args.seeds + 1):
+                try:
+                    v_stream, vw = run_v2_low_hp(sd, w, hp)
+                    p_stream, pw = run_py_low_hp(sd, w, hp)
+                except Exception:
+                    continue
+                vn = base.normalize(v_stream, "v2"); pn = base.normalize(p_stream, "py")
+                d = base.diff_streams(vn, pn)
+                if d["identical"]: n_ok += 1
+                else:
+                    if len(failures) < 3:
+                        failures.append((w, hp, sd, d["first_div"], d["a_at_div"], d["b_at_div"]))
+            n_total += args.seeds
+            n_pass += n_ok
+            if n_ok != args.seeds:
+                print(f"  W={w} hp={hp}: {n_ok}/{args.seeds}")
 
-    print(f"\nRESULTS: {n_ok}/{args.seeds} identical")
-    for s, f, an, bn, av, pv in failures:
-        print(f"  seed {s}: idx {f}")
-        print(f"    v2 ({an}): {av}")
-        print(f"    py ({bn}): {pv}")
+    print(f"\nTOTAL: {n_pass}/{n_total} byte-identical ({100*n_pass//max(1,n_total)}%)")
+    for w, hp, sd, idx, av, pv in failures:
+        print(f"  W={w} hp={hp} seed={sd} @ idx {idx}")
+        print(f"    v2: {av}")
+        print(f"    py: {pv}")
 
 
 if __name__ == "__main__":
