@@ -400,12 +400,16 @@ int lw_map_get_a_star_path(LwMap *self,
     if (list_contains(targets, n_targets, from))
         return -1;
 
-    /* Reset scratch fields on every cell. */
+    /* Reset scratch fields on every cell. weight must be cleared too --
+     * the open-list comparator uses cell->weight live, so any stale value
+     * left over from a previous A* call would corrupt tie-break ordering
+     * on cells that get added but never updated in this run. */
     for (int i = 0; i < self->nb_cells; i++) {
         LwCell *c = &self->cells[i];
         c->visited = 0;
         c->closed = 0;
         c->cost = INT16_MAX;  /* Java: Short.MAX_VALUE */
+        c->weight = 0.0f;
     }
 
     astar_open_clear();

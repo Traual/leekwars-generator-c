@@ -272,10 +272,21 @@ int lw_map_move_entity(LwMap *self, struct LwEntity *e, LwCell *cell) {
  *     entity.setCell(null);
  * }
  */
-void lw_map_remove_entity(LwMap *self, int entity_idx) {
-    if (self->state == NULL) return;
-    struct LwEntity *e = lw_state_get_entity(self->state, entity_idx);
-    if (e == NULL) return;
+/* Java: public void removeEntity(Entity entity) {
+ *     var cell = this.cellByEntity.get(entity);
+ *     this.cellByEntity.remove(entity);
+ *     this.entityByCell.remove(cell);
+ *     entity.setCell(null);
+ * }
+ *
+ * NOTE: previously declared as `int entity_idx` here while lw_state.c had
+ * an extern prototype taking `LwEntity*`, so the pointer got reinterpreted
+ * as a garbage int and `lw_state_get_entity()` returned the wrong entity
+ * (or NULL). Result: dying entities never had their map cell cleared,
+ * leaving "ghost obstacles" that corrupted multi-entity pathfinding.
+ */
+void lw_map_remove_entity(LwMap *self, struct LwEntity *e) {
+    if (self == NULL || e == NULL) return;
     int old_cell_id = lw_entity_get_cell_id(e);
     if (old_cell_id >= 0 && old_cell_id < LW_MAP_MAX_CELLS) {
         self->entity_at_cell[old_cell_id] = -1;
