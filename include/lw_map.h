@@ -208,7 +208,7 @@ int lw_map_move_entity(LwMap *self, struct LwEntity *entity, LwCell *cell);
 void lw_map_remove_entity(LwMap *self, int entity_idx);
 
 /* public void invertEntities(Entity entity1, Entity entity2) */
-void lw_map_invert_entities(LwMap *self, int entity_idx1, int entity_idx2);
+void lw_map_invert_entities(LwMap *self, struct LwEntity *e1, struct LwEntity *e2);
 
 /* public Entity getEntity(Cell cell)
  *

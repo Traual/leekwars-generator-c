@@ -295,17 +295,15 @@ void lw_map_remove_entity(LwMap *self, int entity_idx) {
  *     entity2.setCell(cell1);
  * }
  */
-void lw_map_invert_entities(LwMap *self, int entity_idx1, int entity_idx2) {
-    if (self->state == NULL) return;
-    struct LwEntity *e1 = lw_state_get_entity(self->state, entity_idx1);
-    struct LwEntity *e2 = lw_state_get_entity(self->state, entity_idx2);
-    if (e1 == NULL || e2 == NULL) return;
+void lw_map_invert_entities(LwMap *self, struct LwEntity *e1, struct LwEntity *e2) {
+    if (self == NULL || e1 == NULL || e2 == NULL) return;
     int cell1_id = lw_entity_get_cell_id(e1);
     int cell2_id = lw_entity_get_cell_id(e2);
-    LwCell *cell1 = (cell1_id >= 0) ? &self->cells[cell1_id] : NULL;
-    LwCell *cell2 = (cell2_id >= 0) ? &self->cells[cell2_id] : NULL;
-    if (cell1 != NULL) self->entity_at_cell[cell1->id] = entity_idx2;
-    if (cell2 != NULL) self->entity_at_cell[cell2->id] = entity_idx1;
+    LwCell *cell1 = (cell1_id >= 0 && cell1_id < LW_MAP_MAX_CELLS) ? &self->cells[cell1_id] : NULL;
+    LwCell *cell2 = (cell2_id >= 0 && cell2_id < LW_MAP_MAX_CELLS) ? &self->cells[cell2_id] : NULL;
+    /* entity_at_cell stores FIDs (matches state.getEntity FID lookup). */
+    if (cell1 != NULL) self->entity_at_cell[cell1->id] = lw_entity_get_fid(e2);
+    if (cell2 != NULL) self->entity_at_cell[cell2->id] = lw_entity_get_fid(e1);
     lw_entity_set_cell(e1, cell2);
     lw_entity_set_cell(e2, cell1);
 }

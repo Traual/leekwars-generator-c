@@ -372,10 +372,22 @@ LwEntity** lw_team_get_entities(LwTeam *self, int *out_n) {
 #include "lw_chip.h"
 #include "lw_item.h"
 
-/* Chips template registry -- agents called template_count/at, but the
- * registry uses lw_chips_get_chip(id). Provide stubs. */
-int     lw_chips_template_count(void) { return 0; }
-LwChip* lw_chips_template_at(int idx) { (void)idx; return NULL; }
+/* Chips template registry -- bridge state.c's expected naming
+ * (template_count / template_at) to lw_chips.c's get_templates. */
+extern LwChip **lw_chips_get_templates(int *out_n);
+
+int lw_chips_template_count(void) {
+    int n = 0;
+    lw_chips_get_templates(&n);
+    return n;
+}
+
+LwChip* lw_chips_template_at(int idx) {
+    int n = 0;
+    LwChip **arr = lw_chips_get_templates(&n);
+    if (arr == NULL || idx < 0 || idx >= n) return NULL;
+    return arr[idx];
+}
 
 /* Attack -> Item.cost (Java: Attack inherits Item which has cost). */
 int lw_attack_get_cost(const LwAttack *self) {
