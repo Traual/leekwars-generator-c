@@ -135,39 +135,99 @@ SCENARIOS: dict[str, dict] = {
 
 
 # ---- Cell layouts -------------------------------------------------------
+#
+# The leek-wars-client renders cell N at pixel (px, py) computed by:
+#     mod = tilesX * 2 - 1     # = 35 for an 18x18 map
+#     px  = (N % mod) * 2
+#     py  = (N // mod) * 2
+#     if px > mod: px = px % mod; py += 1
+#
+# This means cell IDs *do* map directly to visible pixel coordinates
+# in the diamond. Earlier layouts (using `x*18 + 17*y` with engine x in
+# [3..11]) ended up packed into the upper-left quadrant -- visually
+# weird, leeks all clustered, and bullets crossing dead space because
+# the diamond's center is at pixel (~17, ~17), not at engine x=6.
+#
+# The helpers below pick cells by their *target pixel position* and
+# then invert the cellToXY math to get the cell ID. This guarantees
+# leeks are placed where they look like they're placed.
 
-def _cells_team(team_idx: int, n: int, *, wide: bool = False) -> list[int]:
-    """Pack ``n`` leeks into one column on the left/right of the diamond.
+_MAP_W = 18
+_MAP_MOD = _MAP_W * 2 - 1   # = 35
+_GRID_MAX = (_MAP_W - 1) * 2  # = 34, the bounding diamond extent in pixels
 
-    Mirrors the layout used by ``test_v2_team_real.py`` (the team-parity
-    test that proved 6v6 byte-identical), so we know the engine accepts
-    these spawn cells. Hand-picked to fit up to 8 per side.
 
-    With ``wide=True`` the columns are pushed to the map edges (x=1 and
-    x=11) so distance ~10 between facing cells -- enough for
-    long-range weapons (rifle 7-9, bazooka 8-12, lightninger 6-10).
+def _cell_at_pixel(px: int, py: int) -> int:
+    """Inverse of the client's cellToXY for an 18x18 map.
+
+    Even rows have even-only px; odd rows have odd-only px. Caller is
+    responsible for parity -- this helper picks the canonical cell at
+    those pixel coords.
     """
-    if not wide:
-        if team_idx == 0:
-            base_xy = [(3, 0), (3, 2), (3, -2), (3, 4), (4, -3), (4, 3), (5, 1), (5, -1)]
-        else:
-            base_xy = [(9, 0), (9, 2), (9, -2), (9, 4), (8, -3), (8, 3), (7, 1), (7, -1)]
+    if py % 2 == 0:
+        if px % 2 != 0:
+            raise ValueError(f"even row {py} requires even px, got {px}")
+        return (py // 2) * _MAP_MOD + (px // 2)
     else:
-        if team_idx == 0:
-            base_xy = [(1, 0), (1, 2), (1, -2), (2, 4), (2, -4), (2, 1), (2, -1), (1, 3)]
-        else:
-            base_xy = [(11, 0), (11, 2), (11, -2), (10, 4), (10, -4), (10, 1), (10, -1), (11, 3)]
-    return [x * 18 + 17 * y for (x, y) in base_xy[:n]]
+        if px % 2 == 0:
+            raise ValueError(f"odd row {py} requires odd px, got {px}")
+        return ((py - 1) // 2) * _MAP_MOD + _MAP_W + (px - 1) // 2
+
+
+def _cells_team(team_idx: int, n: int) -> list[int]:
+    """Place ``n`` leeks down a vertical column on the left/right edge.
+
+    Team A: pixel column at x=4 (with x=6 fallbacks if more than 4
+    leeks). Team B: mirrored at x=30 / x=28. Y values fan out around
+    the diamond center (py ~ 17).
+
+    Hand-picked to fit up to 8 leeks per side without colliding.
+    """
+    # (px, py) slots, ordered by visual priority (front leek first).
+    # Constraint: even rows take even px, odd rows take odd px. We use
+    # only even rows here so every column shares parity (cleaner).
+    a_slots = [(4, 16), (4, 14), (4, 18), (4, 12), (4, 20),
+                (6, 14), (6, 18), (6, 16)]
+    b_slots = [(_GRID_MAX - sx, sy) for sx, sy in a_slots]
+    slots = a_slots if team_idx == 0 else b_slots
+    return [_cell_at_pixel(px, py) for (px, py) in slots[:n]]
 
 
 def _cells_br(n: int) -> list[int]:
-    """Spread ``n`` leeks around an 18x18 diamond for battle royale."""
-    base_xy = [
-        (2, 0), (3, 3), (4, -3), (5, 4),
-        (10, 0), (9, 3), (8, -3), (7, 4),
-        (6, 5), (6, -5),
-    ]
-    return [x * 18 + 17 * y for (x, y) in base_xy[:n]]
+    """Distribute ``n`` leeks evenly around the diamond's center.
+
+    Picks cells closest to the points on a circle of radius ~12 around
+    pixel (17, 17). The result is a balanced spread -- no clustering,
+    visible distance between every pair of leeks.
+    """
+    import math
+    cx, cy, R = _MAP_MOD // 2, _MAP_MOD // 2, 12
+
+    # Build pixel position for every cell once.
+    nb_cells = _MAP_MOD * _MAP_W - (_MAP_W - 1)   # = 613 for 18x18
+    pixel_for = []
+    for cell_id in range(nb_cells):
+        px = (cell_id % _MAP_MOD) * 2
+        py = (cell_id // _MAP_MOD) * 2
+        if px > _MAP_MOD:
+            px = px % _MAP_MOD
+            py += 1
+        pixel_for.append((px, py))
+
+    picks = []
+    for k in range(n):
+        angle = 2 * math.pi * k / n
+        tx = cx + R * math.cos(angle)
+        ty = cy + R * math.sin(angle)
+        # Find closest valid cell that isn't already picked.
+        best = None; best_d = 1e18
+        for cell_id, (px, py) in enumerate(pixel_for):
+            if cell_id in picks: continue
+            d = (px - tx) ** 2 + (py - ty) ** 2
+            if d < best_d:
+                best_d = d; best = cell_id
+        picks.append(best)
+    return picks
 
 
 # ---- Engine setup helpers ----------------------------------------------
@@ -270,11 +330,11 @@ def _make_ai(eng, weapon_id: int, chip_ids: list[int]):
 # ---- Scenario runners --------------------------------------------------
 
 def run_team(per_team: int, weapons: list[int], chips: list[int],
-              seed: int = 1, max_turns: int = 25, wide: bool = False) -> tuple[_v2.Engine, list[dict], list[int], list[int]]:
+              seed: int = 1, max_turns: int = 25) -> tuple[_v2.Engine, list[dict], list[int], list[int]]:
     """Run a per_team-vs-per_team team fight."""
     eng = _setup_engine(weapons)
-    cells_a = _cells_team(0, per_team, wide=wide)
-    cells_b = _cells_team(1, per_team, wide=wide)
+    cells_a = _cells_team(0, per_team)
+    cells_b = _cells_team(1, per_team)
 
     eng.add_team(1, "TA"); eng.add_team(2, "TB")
     fid = 1
@@ -354,12 +414,12 @@ def run_br(n_players: int, weapons: list[int], chips: list[int],
 def run_scenario(name: str, seed: int = 1, max_turns: int = 25):
     cfg = SCENARIOS[name]
     if cfg["mode"] == "team":
-        # Auto-pick wide layout if any weapon's min_range exceeds the
-        # default-layout's facing distance (~6 cells).
-        wide = any(int(base.WEAPONS[w]["min_range"]) >= 6 for w in cfg["weapons"])
+        # The new pixel-based team layout puts teams at x=4 vs x=30 --
+        # ~13 cells apart, which fits every weapon's max_range (the
+        # longest is bazooka 8-12, comfortable). No need for a "wide"
+        # variant anymore.
         return run_team(cfg["per_team"], cfg["weapons"], cfg["chips"],
-                         seed=seed, max_turns=cfg.get("max_turns", max_turns),
-                         wide=wide)
+                         seed=seed, max_turns=cfg.get("max_turns", max_turns))
     elif cfg["mode"] == "br":
         return run_br(cfg["n_players"], cfg["weapons"], cfg["chips"],
                        seed=seed, max_turns=cfg.get("max_turns", max_turns))
