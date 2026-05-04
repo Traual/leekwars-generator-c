@@ -168,6 +168,19 @@ class GreedyVAgent:
         self.temperature = float(temperature)
         self.epsilon = float(epsilon)
         self.rng = rng if rng is not None else np.random.default_rng()
+        # Soft prior added to V values per verb. Helps bootstrap self-
+        # play with a random-init V: even when V is uninformative,
+        # the agent leans toward combat actions (fire, then cast) over
+        # idling. The exact magnitude doesn't matter much -- it just
+        # needs to be larger than the random V's standard deviation
+        # (~0.05 with tanh + uniform-init weights). Reset to all zeros
+        # once V is trained.
+        self.action_prior: dict[int, float] = {
+            END_TURN:    -0.30,   # discourage early end of turn
+            MOVE_TOWARD:  0.00,
+            CAST:         0.10,
+            FIRE:         0.20,   # bias toward firing in stage 1
+        }
 
     @torch.no_grad()
     def _score_candidates(self, eng, idx: int,
@@ -199,10 +212,12 @@ class GreedyVAgent:
         x = torch.from_numpy(feats).to(self.device)
         v = self.model(x).detach().cpu().numpy().astype(np.float32, copy=False)
 
-        # Apply illegal-action penalty.
+        # Apply illegal-action penalty + the soft per-verb prior.
         for i, a in enumerate(candidates):
             if a.verb != END_TURN and feats[i, 0] == -1.0:
                 v[i] = -1e6
+            else:
+                v[i] += self.action_prior.get(a.verb, 0.0)
         return v
 
     def _select(self, candidates: List[Action], values: np.ndarray) -> int:

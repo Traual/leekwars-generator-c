@@ -31,3 +31,6 @@ venv/
 
 # Logs
 *.log
+
+# Leek-Zero training artifacts
+leekzero_runs/
