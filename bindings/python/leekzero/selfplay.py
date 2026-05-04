@@ -95,7 +95,8 @@ def make_1v1_pistol_flame(seed: int = 1, *,
 def play_one_fight(agent: agent_mod.GreedyVAgent,
                     scenario: callable = make_1v1_pistol_flame,
                     seed: int = 1,
-                    label_mode: str = "margin") -> Tuple[np.ndarray, np.ndarray, int]:
+                    label_mode: str = "margin",
+                    opponent_agent=None) -> Tuple[np.ndarray, np.ndarray, int]:
     """Run one fight where ``agent`` plays both sides. Capture state
     features at every AI callback entry, then back-fill the eventual
     outcome label per captured state's team perspective.
@@ -139,7 +140,10 @@ def play_one_fight(agent: agent_mod.GreedyVAgent,
         feats = np.zeros(FEATURE_DIM, dtype=np.float32)
         eng.extract_v_features(idx, feats)
         captured_feats.append(feats)
-        captured_teams.append(eng.entity_team(idx))
+        team = eng.entity_team(idx)
+        captured_teams.append(team)
+        if opponent_agent is not None and team != 0:
+            return opponent_agent.play_turn(eng, idx, turn)
         return agent.play_turn(eng, idx, turn)
 
     eng.set_ai_callback(cb)
@@ -197,13 +201,30 @@ SPATIAL_TOTAL = 4 * 18 * 35   # 2520
 def play_one_fight_hybrid(agent,
                             scenario: callable = make_1v1_pistol_flame,
                             seed: int = 1,
-                            label_mode: str = "margin"):
+                            label_mode: str = "margin",
+                            opponent_agent=None,
+                            capture_opponent: bool = True,
+                            swap_sides: bool = False):
     """Hybrid variant of ``play_one_fight``: also captures the
     spatial tensor at each callback. Returns (entity_states,
     spatial_states, labels, winner).
 
     The spatial array is shape (N, C, H, W) ready to feed into
     HybridV1 after ``torch.from_numpy``.
+
+    Asymmetric play (broken-symmetry signal for V):
+      ``opponent_agent``: if given, plays one of the teams while
+      ``agent`` plays the other. Default mapping: ``agent`` ->
+      team 0, ``opponent_agent`` -> team 1.
+      ``swap_sides=True`` reverses that mapping so the candidate
+      plays team 1 instead. Pair (swap=False, swap=True) on the
+      same engine seed gives a mirror match and removes any first-
+      player / map-half bias from the win-rate signal.
+
+      ``capture_opponent``: when True (default), states from the
+      opponent's turns are also captured + labeled. The candidate
+      learns from BOTH perspectives, which doubles useful data per
+      fight.
     """
     eng = scenario(seed)
     agent_mod._callback_engine = eng
@@ -218,15 +239,32 @@ def play_one_fight_hybrid(agent,
         team = eng.entity_team(i)
         initial_life[team] = initial_life.get(team, 0) + eng.entity_hp(i)
 
+    # Side mapping: by default the candidate (`agent`) plays
+    # team 0. ``swap_sides=True`` flips that so the candidate plays
+    # team 1 instead. Pure self-play (opponent_agent is None)
+    # ignores swap_sides since both sides use the same agent.
+    cand_team = 1 if swap_sides else 0
+
     def cb(idx: int, turn: int) -> int:
+        ent_team = eng.entity_team(idx)
+        is_candidate_side = (opponent_agent is None) or (ent_team == cand_team)
+
+        if (not is_candidate_side) and (not capture_opponent):
+            # Skip data capture for the heuristic side when the
+            # caller asked us to.
+            return opponent_agent.play_turn(eng, idx, turn)
+
         e = np.zeros(FEATURE_DIM, dtype=np.float32)
         s = np.zeros(SPATIAL_TOTAL, dtype=np.float32)
         eng.extract_v_features(idx, e)
         eng.extract_spatial_features(idx, s)
         captured_ent.append(e)
         captured_spt.append(s)
-        captured_teams.append(eng.entity_team(idx))
-        return agent.play_turn(eng, idx, turn)
+        captured_teams.append(ent_team)
+
+        if is_candidate_side:
+            return agent.play_turn(eng, idx, turn)
+        return opponent_agent.play_turn(eng, idx, turn)
 
     eng.set_ai_callback(cb)
     eng.run()

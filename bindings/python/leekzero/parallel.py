@@ -38,9 +38,11 @@ import numpy as np
 # worker process). Defining them at module level so worker functions
 # can refer to them without juggling closures across the pickle
 # boundary.
-_W_AGENT = None              # leekzero.agent.GreedyVAgent
+_W_AGENT = None              # leekzero.agent.GreedyVAgent / HybridGreedyAgent
+_W_HEURISTIC = None          # leekzero.agent.ScriptedAgent (for asymmetric play)
 _W_SCENARIO_FN = None        # callable: (seed) -> Engine
 _W_TORCH_THREADS = 1
+_W_MODEL_KIND = "mlp"
 
 
 def _worker_init(model_state_dict, weapons, chips,
@@ -103,27 +105,47 @@ def _worker_init(model_state_dict, weapons, chips,
         ag.action_prior = dict(action_prior)
     _W_AGENT = ag
 
+    # Always-available heuristic opponent for asymmetric self-play
+    # (fraction of fights configured at the play_batch level via the
+    # `seed % heuristic_period` rule).
+    global _W_HEURISTIC, _W_MODEL_KIND
+    _W_HEURISTIC = agent_mod.ScriptedAgent(
+        weapons=list(weapons), chips=list(chips))
+    _W_MODEL_KIND = model_kind
+
     # Resolve the scenario factory.
     mod_name, _, attr = scenario_fn_path.rpartition(":")
     import importlib
     _W_SCENARIO_FN = getattr(importlib.import_module(mod_name), attr)
 
 
-def _worker_play_one(seed):
-    """Worker entry point (MLP / entity-only model): play one fight
-    and return (states, labels, winner)."""
+def _worker_play_one(task):
+    """Worker entry point (MLP / entity-only model). ``task`` is
+    a 3-tuple ``(seed, mode, swap)``:
+      mode == "self": pure self-play (agent on both sides)
+      mode == "asym": candidate vs scripted heuristic (asymmetric)
+      swap == True flips which team the candidate plays (mirror)
+    """
     from leekzero.selfplay import play_one_fight
+    seed, mode, swap = task
+    opp = _W_HEURISTIC if mode == "asym" else None
     states, labels, winner = play_one_fight(
-        _W_AGENT, scenario=_W_SCENARIO_FN, seed=int(seed))
+        _W_AGENT, scenario=_W_SCENARIO_FN, seed=int(seed),
+        opponent_agent=opp)
+    # Note: swap_sides not implemented for the entity-only path
+    # (legacy MLPv1). The hybrid path below honors it.
     return states, labels, winner
 
 
-def _worker_play_one_hybrid(seed):
-    """Worker entry point for the Hybrid model: returns
-    (entity_states, spatial_states, labels, winner)."""
+def _worker_play_one_hybrid(task):
+    """Worker entry point for the Hybrid model. ``task`` is
+    ``(seed, mode, swap)`` -- see _worker_play_one."""
     from leekzero.selfplay import play_one_fight_hybrid
+    seed, mode, swap = task
+    opp = _W_HEURISTIC if mode == "asym" else None
     ent, spt, labels, winner = play_one_fight_hybrid(
-        _W_AGENT, scenario=_W_SCENARIO_FN, seed=int(seed))
+        _W_AGENT, scenario=_W_SCENARIO_FN, seed=int(seed),
+        opponent_agent=opp, swap_sides=bool(swap))
     return ent, spt, labels, winner
 
 
@@ -136,11 +158,19 @@ class ParallelSelfPlay:
     def __init__(self, n_workers: int = 8,
                   scenario_fn_path: str = "leekzero.selfplay:make_1v1_pistol_flame",
                   torch_threads: int = 1,
-                  model_kind: str = "mlp"):
+                  model_kind: str = "mlp",
+                  heuristic_period: int = 0):
+        """``heuristic_period``: 0 disables asymmetric play. Any
+        N > 0 makes 2 fights out of every N a mirror pair against
+        a fixed scripted heuristic (one direct, one with sides
+        swapped, both on the same engine seed). N=6 -> ~33%
+        asymmetric coverage; N=10 -> 20%; etc.
+        """
         self.n_workers = int(n_workers)
         self.scenario_fn_path = scenario_fn_path
         self.torch_threads = int(torch_threads)
         self.model_kind = model_kind
+        self.heuristic_period = int(heuristic_period)
         self._pool: Optional[mp.pool.Pool] = None
         # Args that get baked into the pool initializer:
         self._init_args: Optional[tuple] = None
@@ -179,6 +209,32 @@ class ParallelSelfPlay:
             initargs=self._init_args,
         )
 
+    def _build_tasks(self, n_fights: int, seed_base: int) -> list:
+        """Construct a flat list of (seed, mode, swap) tuples.
+
+        With ``heuristic_period == N > 0`` we earmark every Nth slot
+        as a mirror pair: position 0 -> ("asym", swap=False), and
+        position 1 -> ("asym", swap=True) on the SAME engine seed.
+        That way the candidate sees both sides of the same map
+        against the scripted opponent in each pair, eliminating any
+        first-player or map-half bias.
+
+        Self-play slots use mode="self".
+        """
+        tasks = []
+        N = self.heuristic_period
+        i = 0
+        while i < n_fights:
+            seed = seed_base + i
+            if N > 0 and (i % N) == 0 and i + 1 < n_fights:
+                tasks.append((seed, "asym", False))
+                tasks.append((seed, "asym", True))    # mirror, same engine seed
+                i += 2
+            else:
+                tasks.append((seed, "self", False))
+                i += 1
+        return tasks
+
     def play_batch(self, n_fights: int, seed_base: int = 0) -> tuple:
         """Run ``n_fights`` fights across the worker pool. Returns
         (states, labels, winners) for MLP, or (entity, spatial,
@@ -186,7 +242,7 @@ class ParallelSelfPlay:
         """
         if self._pool is None:
             raise RuntimeError("set_model() must be called before play_batch")
-        seeds = [seed_base + i for i in range(n_fights)]
+        tasks = self._build_tasks(n_fights, seed_base)
 
         if self.model_kind == "hybrid":
             ent_chunks = []
@@ -194,7 +250,7 @@ class ParallelSelfPlay:
             lab_chunks = []
             winners: list[int] = []
             for ent, spt, labels, winner in self._pool.imap_unordered(
-                    _worker_play_one_hybrid, seeds, chunksize=4):
+                    _worker_play_one_hybrid, tasks, chunksize=4):
                 ent_chunks.append(ent)
                 spt_chunks.append(spt)
                 lab_chunks.append(labels)
@@ -213,7 +269,7 @@ class ParallelSelfPlay:
         all_labels = []
         winners: list[int] = []
         for states, labels, winner in self._pool.imap_unordered(
-                _worker_play_one, seeds, chunksize=4):
+                _worker_play_one, tasks, chunksize=4):
             all_states.append(states)
             all_labels.append(labels)
             winners.append(int(winner))

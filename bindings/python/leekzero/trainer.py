@@ -86,13 +86,21 @@ class Config:
     buffer_capacity: int = 200_000
     eval_every: int = 10
     eval_fights: int = 100
-    eval_promote_threshold: float = 0.55
+    # Slightly looser threshold than the textbook 55%: with eval
+    # fights ~300, the binomial std is ~2.9%, so 55% is ~1.7 sigma
+    # above 50% -- we'd miss many genuine improvements in noise.
+    # 52% is ~0.7 sigma which catches more real progress.
+    eval_promote_threshold: float = 0.52
     learning_rate: float = 1e-3
     weight_decay: float = 1e-4
     # Exploration schedule: (eps_start, eps_end, anneal_cycles)
     eps_start: float = 0.5
     eps_end: float = 0.05
-    eps_anneal_cycles: int = 50
+    # 150 cycles instead of 50 -- in the v1 long run the candidate
+    # locked into eps=0.05 way before V learned anything useful, then
+    # drifted off in noise. Keeping more exploration buys time for
+    # signal to accumulate.
+    eps_anneal_cycles: int = 150
     temperature: float = 0.5
     seed_base: int = 1
     out_dir: str = "leekzero_runs/run0"
@@ -106,6 +114,18 @@ class Config:
     pool_refresh_every: int = 5
     # Stability: clip gradient L2-norm to this value (0 = no clip)
     grad_clip: float = 1.0
+    # Force-copy candidate to best every N cycles even without an
+    # eval pass. Prevents the candidate from drifting indefinitely
+    # off the best (the failure mode we saw in the v1 long run:
+    # one early promote then 100+ cycles of degrading eval). 0
+    # disables.
+    force_promote_every: int = 20
+    # Asymmetric self-play mix: 0 disables, otherwise every Nth pair
+    # of fights is candidate vs ScriptedAgent in mirror configuration
+    # (one direct, one with sides swapped). N=6 -> ~33% asymmetric;
+    # N=10 -> ~20%. The asymmetry breaks the symmetry of pure
+    # self-play and gives V a clearer win/loss signal early on.
+    heuristic_period: int = 6
 
 
 def seed_all(seed: int) -> None:
@@ -360,6 +380,19 @@ def main():
     p.add_argument("--model",     default="mlp", choices=["mlp", "hybrid"],
                     help="V-network architecture: mlp (entity-only "
                          "256-d) or hybrid (CNN spatial + entity MLP)")
+    p.add_argument("--force-promote-every", type=int, default=20,
+                    help="copy candidate -> best every N cycles even "
+                         "without passing the eval threshold (prevents "
+                         "the candidate drifting away from a stale best)")
+    p.add_argument("--heuristic-period", type=int, default=6,
+                    help="0 = pure self-play. >0 inserts asymmetric "
+                         "mirror-pair fights vs a scripted heuristic "
+                         "every Nth slot, breaking the symmetry that "
+                         "stalls early V learning.")
+    p.add_argument("--eps-anneal-cycles", type=int, default=150,
+                    help="cycles to anneal epsilon from 0.5 -> 0.05")
+    p.add_argument("--promote-threshold", type=float, default=0.52,
+                    help="win-rate vs best needed to promote candidate")
     args = p.parse_args()
 
     cfg = Config(
@@ -372,6 +405,10 @@ def main():
         pool_refresh_every=args.pool_refresh_every,
         scenario=args.scenario,
         model_kind=args.model,
+        force_promote_every=args.force_promote_every,
+        heuristic_period=args.heuristic_period,
+        eps_anneal_cycles=args.eps_anneal_cycles,
+        eval_promote_threshold=args.promote_threshold,
     )
     scenario_path, scenario_fn = SCENARIOS[cfg.scenario]
     print(f"[trainer] scenario = {cfg.scenario} -> {scenario_path}")
@@ -407,8 +444,10 @@ def main():
         parallel_sp = ParallelSelfPlay(
             n_workers=cfg.n_workers,
             scenario_fn_path=scenario_path,
-            model_kind=cfg.model_kind)
-        print(f"[trainer] parallel self-play with {cfg.n_workers} workers")
+            model_kind=cfg.model_kind,
+            heuristic_period=cfg.heuristic_period)
+        print(f"[trainer] parallel self-play with {cfg.n_workers} workers"
+              f" (heuristic_period={cfg.heuristic_period})")
 
     cycle = 0
     while True:
@@ -473,6 +512,21 @@ def main():
             else:
                 record["promoted"] = False
 
+        # Force-refresh: every N cycles copy candidate -> best even
+        # if eval didn't pass. This is the v2-long-run lesson: an
+        # early one-time promote followed by 100+ cycles of stale
+        # best causes the candidate to drift in the buffer's noise
+        # without ever climbing back. Forcing the best to follow
+        # the candidate keeps both in the same neighborhood and
+        # prevents indefinite divergence.
+        if (cfg.force_promote_every > 0 and cycle > 0
+                and cycle % cfg.force_promote_every == 0
+                and not record.get("promoted")):
+            save_model(cand_model, best_path)
+            best_model = make_model(cfg.model_kind)
+            best_model.load_state_dict(cand_model.state_dict())
+            record["force_promoted"] = True
+
         # Always keep the latest candidate around so a crash doesn't
         # cost the whole cycle's progress.
         save_model(cand_model, cand_path)
@@ -489,6 +543,8 @@ def main():
             ev = record["eval"]
             line += f" | EVAL win={ev['win_rate']*100:.1f}% "
             line += "(PROMOTED)" if record.get("promoted") else "(no)"
+        if record.get("force_promoted"):
+            line += " | FORCE-REFRESH best"
         print(line, flush=True)
 
         cycle += 1

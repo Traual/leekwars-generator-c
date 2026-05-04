@@ -288,6 +288,77 @@ def build_callback(agent: GreedyVAgent):
 _callback_engine = None
 
 
+# ============================================================ ScriptedAgent ==
+
+
+class ScriptedAgent:
+    """Deterministic heuristic agent. No NN forward, no clones, no
+    candidate enumeration -- just imperative "find nearest enemy ->
+    move toward -> cast each chip -> fire weapon until TP runs out".
+
+    Used as a *fixed* opponent in a fraction of self-play fights so
+    the candidate NN sees a non-symmetric counterparty: clear wins
+    (when NN beats scripted) and clear losses (when scripted beats
+    NN) become labeled training signal that pure self-play can't
+    produce.
+
+    Same play_turn() signature as GreedyVAgent / HybridGreedyAgent so
+    it's a drop-in replacement at the per-callback level.
+    """
+
+    def __init__(self, weapons: Sequence[int], chips: Sequence[int],
+                  *, max_actions_per_turn: int = 32):
+        self.weapons = list(weapons)
+        self.chips = list(chips)
+        self.max_actions_per_turn = max_actions_per_turn
+
+    def play_turn(self, eng, idx: int, turn: int) -> int:
+        """Imperative tactic: pick nearest enemy; move toward;
+        cast each chip; spam the primary weapon."""
+        n = eng.n_entities()
+        my_team = eng.entity_team(idx)
+        my_cell = eng.entity_cell(idx)
+
+        target = -1
+        bd = 10 ** 9
+        for i in range(n):
+            if i == idx or not eng.entity_alive(i): continue
+            if eng.entity_team(i) == my_team: continue
+            d = eng.cell_distance2(my_cell, eng.entity_cell(i))
+            if d < bd:
+                bd = d; target = i
+        if target < 0:
+            return 0
+
+        applied = 0
+        target_cell = eng.entity_cell(target)
+        # Move toward target (engine clamps to MP available; if we're
+        # already adjacent it's a no-op).
+        if eng.move_toward(idx, target_cell, max_mp=10) > 0:
+            applied += 1
+
+        # Cast each chip on the current target's cell. Engine
+        # rejects illegal casts (range / cooldown / TP) silently.
+        for c in self.chips:
+            if not eng.entity_alive(target): break
+            if applied >= self.max_actions_per_turn: break
+            target_cell = eng.entity_cell(target)
+            if eng.use_chip(idx, c, target_cell) > 0:
+                applied += 1
+
+        # Fire the primary weapon until we can't.
+        primary = self.weapons[0] if self.weapons else 37
+        for _ in range(8):
+            if not eng.entity_alive(target): break
+            if applied >= self.max_actions_per_turn: break
+            target_cell = eng.entity_cell(target)
+            rc = eng.fire_weapon(idx, primary, target_cell)
+            if rc <= 0: break
+            applied += 1
+
+        return applied
+
+
 # ============================================================ Hybrid agent ==
 
 
