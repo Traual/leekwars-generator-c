@@ -364,7 +364,11 @@ def run_team(per_team: int, weapons: list[int], chips: list[int],
 
     eng.set_seed(seed); eng.set_max_turns(max_turns)
     eng.set_type(TYPE_TEAM if per_team > 1 else TYPE_SOLO)
-    eng.set_custom_map(obstacles={}, team1=cells_a, team2=cells_b)
+    # map_id=1 makes the engine respect each entity's initial_cell
+    # (passed via add_entity above). With map_id=0 the engine reads
+    # cells from team1/team2 lists in order, which is fine here (only
+    # 2 teams) but conflicts with our intent for BR.
+    eng.set_custom_map(obstacles={}, team1=cells_a, team2=cells_b, map_id=1)
     eng.set_ai_callback(_make_ai(eng, weapons[0], chips))
     eng.run()
 
@@ -398,8 +402,13 @@ def run_br(n_players: int, weapons: list[int], chips: list[int],
 
     eng.set_seed(seed); eng.set_max_turns(max_turns)
     eng.set_type(TYPE_BATTLE_ROYALE)
-    # BR custom map: pass all cells as team1, team2 empty.
-    eng.set_custom_map(obstacles={}, team1=cells, team2=[])
+    # CRITICAL: in BR mode the engine *ignores* the team1/team2 lists
+    # and would call getRandomCell() for every entity (each one is its
+    # own team, and only teams 0 & 1 read from team1/team2 anyway).
+    # Setting map_id=1 forces the engine to honor each entity's
+    # initial_cell (the cell= argument we passed to add_entity), which
+    # is the only way to spawn a BR with a deterministic layout.
+    eng.set_custom_map(obstacles={}, team1=cells, team2=[], map_id=1)
     eng.set_ai_callback(_make_ai(eng, weapons[0], chips))
     eng.run()
 
