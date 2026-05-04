@@ -94,18 +94,31 @@ def make_1v1_pistol_flame(seed: int = 1, *,
 
 def play_one_fight(agent: agent_mod.GreedyVAgent,
                     scenario: callable = make_1v1_pistol_flame,
-                    seed: int = 1) -> Tuple[np.ndarray, np.ndarray, int]:
+                    seed: int = 1,
+                    label_mode: str = "margin") -> Tuple[np.ndarray, np.ndarray, int]:
     """Run one fight where ``agent`` plays both sides. Capture state
     features at every AI callback entry, then back-fill the eventual
     outcome label per captured state's team perspective.
 
+    label_mode:
+      "binary" -- pure +1/-1/0 from the winner field. Fast and
+                  simple but very low signal: every state in the
+                  same fight gets the same label.
+      "margin" -- signed HP-margin at end-of-fight, scaled to
+                  [-1, +1]:
+                      margin = (my_team_HP - enemy_team_HP) / total_initial
+                  A clean wipe (enemy at 0, you full HP) gives ~+1; a
+                  pure exchange of blows ends near 0 even if you
+                  technically "won". Much richer training signal
+                  than binary, since states that lead to dominant
+                  positions are scored higher than states that
+                  squeak by. Default.
+
     Returns:
         states  -- (N, FEATURE_DIM) float32 array, one row per
                    decision-point.
-        labels  -- (N,) float32 array of eventual outcomes:
-                       +1 if active team won
-                       -1 if active team lost
-                        0 if draw
+        labels  -- (N,) float32 array of outcomes from each captured
+                   state's team perspective, in [-1, +1].
         winner  -- the engine's winner team id (1, 2, or -1).
     """
     eng = scenario(seed)
@@ -114,11 +127,15 @@ def play_one_fight(agent: agent_mod.GreedyVAgent,
     captured_feats: list[np.ndarray] = []
     captured_teams: list[int] = []
 
+    # Snapshot total initial life per team so we can compute the
+    # margin label after the fight.
+    n_ent = eng.n_entities()
+    initial_life_by_team: dict[int, int] = {}
+    for i in range(n_ent):
+        team = eng.entity_team(i)
+        initial_life_by_team[team] = initial_life_by_team.get(team, 0) + eng.entity_hp(i)
+
     def cb(idx: int, turn: int) -> int:
-        # Snapshot state features at the START of each leek's turn,
-        # *before* the agent decides anything. The label that will
-        # be back-filled describes "from this state, did my team
-        # eventually win?" -- which is exactly what V should learn.
         feats = np.zeros(FEATURE_DIM, dtype=np.float32)
         eng.extract_v_features(idx, feats)
         captured_feats.append(feats)
@@ -132,15 +149,40 @@ def play_one_fight(agent: agent_mod.GreedyVAgent,
     n = len(captured_feats)
     states = np.zeros((n, FEATURE_DIM), dtype=np.float32) if n else np.zeros((0, FEATURE_DIM), dtype=np.float32)
     labels = np.zeros(n, dtype=np.float32)
-    for i in range(n):
-        states[i] = captured_feats[i]
-        team = captured_teams[i]
-        if winner == -1:
-            labels[i] = 0.0
-        elif team == winner:
-            labels[i] = 1.0
-        else:
-            labels[i] = -1.0
+
+    if label_mode == "margin":
+        # Final HP per team, normalized by *total* initial life
+        # (sum across both teams). The label per captured state's
+        # team perspective is signed: positive when my team has more
+        # HP at the end. This yields a continuous target even when
+        # the winner field reports a draw (e.g., max-turn timeout).
+        final_life: dict[int, int] = {}
+        for i in range(eng.n_entities()):
+            t = eng.entity_team(i)
+            if eng.entity_alive(i):
+                final_life[t] = final_life.get(t, 0) + eng.entity_hp(i)
+            else:
+                final_life.setdefault(t, 0)
+        total_initial = max(sum(initial_life_by_team.values()), 1)
+        for i in range(n):
+            team = captured_teams[i]
+            my_final  = final_life.get(team, 0)
+            enemy_final = sum(v for t, v in final_life.items() if t != team)
+            margin = (my_final - enemy_final) / total_initial
+            # Clamp to [-1, +1] just in case (numerical safety).
+            labels[i] = float(max(-1.0, min(1.0, margin)))
+            states[i] = captured_feats[i]
+    else:
+        # Binary fallback for ablations.
+        for i in range(n):
+            states[i] = captured_feats[i]
+            team = captured_teams[i]
+            if winner == -1:
+                labels[i] = 0.0
+            elif team == winner:
+                labels[i] = 1.0
+            else:
+                labels[i] = -1.0
     return states, labels, winner
 
 

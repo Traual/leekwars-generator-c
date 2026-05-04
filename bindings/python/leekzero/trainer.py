@@ -191,10 +191,19 @@ def train_steps(model: MLPv1,
 
 
 def eval_match(candidate: MLPv1, opponent: MLPv1, n_fights: int,
-                seed_base: int = 1_000_000) -> dict:
+                seed_base: int = 1_000_000,
+                eval_temperature: float = 0.1) -> dict:
     """Play ``n_fights`` symmetric 1v1s: candidate as team 1, opponent
     as team 2 for the first half, then swap. Returns win-rate of
-    candidate."""
+    candidate.
+
+    ``eval_temperature``: small softmax temperature (default 0.1) on
+    both sides. Pure argmax (T=0) makes both agents deterministic
+    and they tie-break identically, so even genuinely different V
+    networks play mirror fights -- every match draws and the eval
+    reports 50%. A small temperature lets the better V's edge come
+    through statistically without flooding decisions with noise.
+    """
     half = n_fights // 2
     cand_wins = 0
     opp_wins  = 0
@@ -211,10 +220,12 @@ def eval_match(candidate: MLPv1, opponent: MLPv1, n_fights: int,
         eng = make_1v1_pistol_flame(seed=seed_base + k)
         ag_cand = agent_mod.GreedyVAgent(
             candidate, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
-            temperature=0.0, epsilon=0.0)
+            temperature=eval_temperature, epsilon=0.0,
+            rng=np.random.default_rng(seed_base + k))
         ag_opp = agent_mod.GreedyVAgent(
             opponent, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
-            temperature=0.0, epsilon=0.0)
+            temperature=eval_temperature, epsilon=0.0,
+            rng=np.random.default_rng(seed_base + k + 1_000_000_000))
         agent_mod._callback_engine = eng
         # Per-callback: pick the agent matching the entity's team.
         def cb(idx: int, turn: int) -> int:
