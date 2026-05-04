@@ -122,14 +122,21 @@ def build_report(
     farmers2: dict[int, dict] | None = None,
     winner: int | None = None,
     ai_logs: dict | None = None,
+    events_override: list[dict] | None = None,
 ) -> dict:
     """Wrap a v2 engine into the report.json envelope expected by leek-wars-client.
 
     Pass the engine *after* it has been ``run()``. Optionally pass
     farmers1 / farmers2 dicts (else a single placeholder farmer per team
     is generated from the leek list).
+
+    ``events_override`` lets a caller supply a *modified* stream (for
+    example with synthetic SET_WEAPON actions inserted between
+    consecutive USE_WEAPON shots whose actual weapon differs). When
+    omitted, the engine's stream_dump is used as-is.
     """
-    actions = [_to_player_action(e) for e in engine.stream_dump()]
+    src_events = events_override if events_override is not None else engine.stream_dump()
+    actions = [_to_player_action(e) for e in src_events]
 
     if farmers1 is None or farmers2 is None:
         # Build placeholders from the leek list.
