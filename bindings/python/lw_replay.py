@@ -44,8 +44,11 @@ def _free_port(port: int) -> bool:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--seed", type=int, default=1, help="fight RNG seed")
-    p.add_argument("--turns", type=int, default=20, help="max turns")
+    p.add_argument("--turns", type=int, default=25, help="max turns")
     p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--scenario", default=None,
+                    help="name of a stress scenario (replay_stress.py "
+                         "--list). Default: small 1v1 demo.")
     p.add_argument("--no-browser", action="store_true",
                     help="don't open the browser automatically")
     p.add_argument("--keep", action="store_true",
@@ -53,15 +56,28 @@ def main():
                          "(default: same)")
     args = p.parse_args()
 
-    # 1. Generate the fight.
-    print(f"[1/3] generating fight (seed={args.seed}, turns={args.turns})...")
-    r = subprocess.run(
-        [sys.executable, os.path.join(HERE, "replay_demo.py"),
-         "--seed", str(args.seed),
-         "--turns", str(args.turns),
-         "--out", REPORT],
-        check=True,
-    )
+    # 1. Generate the fight -- either the simple demo or a named stress
+    #    scenario.
+    if args.scenario:
+        print(f"[1/3] generating scenario {args.scenario!r} "
+              f"(seed={args.seed}, turns={args.turns})...")
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, "replay_stress.py"),
+             "--scenario", args.scenario,
+             "--seed", str(args.seed),
+             "--turns", str(args.turns),
+             "--out", REPORT],
+            check=True,
+        )
+    else:
+        print(f"[1/3] generating fight (seed={args.seed}, turns={args.turns})...")
+        r = subprocess.run(
+            [sys.executable, os.path.join(HERE, "replay_demo.py"),
+             "--seed", str(args.seed),
+             "--turns", str(args.turns),
+             "--out", REPORT],
+            check=True,
+        )
     if r.returncode != 0:
         sys.exit(r.returncode)
 
