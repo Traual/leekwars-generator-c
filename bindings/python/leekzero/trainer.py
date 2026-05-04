@@ -54,6 +54,7 @@ from leekzero.selfplay import (
     ReplayBuffer, make_1v1_pistol_flame, play_one_fight,
     WEAPON_PISTOL, CHIP_FLAME,
 )
+from leekzero.parallel import ParallelSelfPlay
 
 
 @dataclass
@@ -77,6 +78,16 @@ class Config:
     temperature: float = 0.5
     seed_base: int = 1
     out_dir: str = "leekzero_runs/run0"
+    # Multiprocessing: 0 = single-process, >=1 = number of workers
+    n_workers: int = 0
+    # How many cycles between pool refreshes. Pool spin-up costs
+    # ~2-3 s on Windows; refreshing every cycle wastes that on
+    # shorter cycles. The workers play with stale weights between
+    # refreshes, but with eps_explore in [0.05, 0.5] the staleness
+    # has small effect on data quality.
+    pool_refresh_every: int = 5
+    # Stability: clip gradient L2-norm to this value (0 = no clip)
+    grad_clip: float = 1.0
 
 
 def seed_all(seed: int) -> None:
@@ -101,8 +112,8 @@ def collect_self_play(agent: agent_mod.GreedyVAgent,
                        buffer: ReplayBuffer,
                        n_fights: int,
                        seed_base: int) -> dict:
-    """Run ``n_fights`` self-play fights, push samples into the
-    buffer, and return summary stats."""
+    """Single-process self-play: run ``n_fights`` fights, push
+    samples into the buffer, and return summary stats."""
     t0 = time.perf_counter()
     n_samples = 0
     winners: dict[int, int] = {}
@@ -119,13 +130,38 @@ def collect_self_play(agent: agent_mod.GreedyVAgent,
     }
 
 
+def collect_self_play_parallel(sp: ParallelSelfPlay,
+                                 buffer: ReplayBuffer,
+                                 n_fights: int,
+                                 seed_base: int) -> dict:
+    """Multi-process self-play via the worker pool. Same return
+    shape as ``collect_self_play``."""
+    t0 = time.perf_counter()
+    states, labels, winners = sp.play_batch(n_fights, seed_base=seed_base)
+    buffer.push(states, labels)
+    win_counts: dict[int, int] = {}
+    for w in winners:
+        win_counts[w] = win_counts.get(w, 0) + 1
+    return {
+        "fights":  n_fights,
+        "samples": states.shape[0],
+        "winners": win_counts,
+        "fights_per_sec": n_fights / max(time.perf_counter() - t0, 1e-9),
+    }
+
+
 def train_steps(model: MLPv1,
                  optimizer: torch.optim.Optimizer,
                  buffer: ReplayBuffer,
                  n_steps: int,
-                 batch_size: int) -> dict:
+                 batch_size: int,
+                 grad_clip: float = 0.0) -> dict:
     """Run ``n_steps`` SGD updates on samples drawn from ``buffer``.
-    Returns mean loss + value-prediction MAE."""
+    Returns mean loss + value-prediction MAE.
+
+    With ``grad_clip > 0`` we clip the global L2 grad norm before
+    stepping (standard RL stability guard rail; default 1.0).
+    """
     if len(buffer) < batch_size:
         return {"steps": 0, "loss": float("nan"), "mae": float("nan")}
     model.train()
@@ -140,6 +176,8 @@ def train_steps(model: MLPv1,
         loss = torch.nn.functional.mse_loss(v, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        if grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
         losses.append(float(loss.item()))
         maes.append(float((v.detach() - y).abs().mean().item()))
@@ -224,6 +262,15 @@ def main():
     p.add_argument("--eval-every",  type=int, default=10)
     p.add_argument("--eval-fights", type=int, default=100)
     p.add_argument("--lr",       type=float, default=1e-3)
+    p.add_argument("--workers",  type=int, default=0,
+                    help="0 = single-process; >0 = parallel self-play "
+                         "with this many workers")
+    p.add_argument("--pool-refresh-every", type=int, default=5,
+                    help="rebuild worker pool with new weights every N "
+                         "cycles (only with --workers>0)")
+    p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument("--buffer",    type=int, default=200_000,
+                    help="replay buffer capacity in samples")
     args = p.parse_args()
 
     cfg = Config(
@@ -231,6 +278,9 @@ def main():
         train_steps_per_cycle=args.steps, batch_size=args.batch,
         eval_every=args.eval_every, eval_fights=args.eval_fights,
         learning_rate=args.lr, seed_base=args.seed, out_dir=args.out_dir,
+        n_workers=args.workers, grad_clip=args.grad_clip,
+        buffer_capacity=args.buffer,
+        pool_refresh_every=args.pool_refresh_every,
     )
     out = Path(cfg.out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -252,24 +302,50 @@ def main():
 
     buffer = ReplayBuffer(capacity=cfg.buffer_capacity)
 
+    # Optional parallel self-play. When n_workers>0 we keep a pool
+    # alive across cycles and just refresh its weights via
+    # set_model() at the top of each cycle.
+    parallel_sp: Optional[ParallelSelfPlay] = None
+    if cfg.n_workers > 0:
+        parallel_sp = ParallelSelfPlay(n_workers=cfg.n_workers)
+        print(f"[trainer] parallel self-play with {cfg.n_workers} workers")
+
     cycle = 0
     while True:
         eps = epsilon_schedule(cycle, cfg)
-        agent = agent_mod.GreedyVAgent(
-            cand_model, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
-            temperature=cfg.temperature, epsilon=eps)
 
-        sp = collect_self_play(
-            agent, buffer, cfg.fights_per_cycle,
-            seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle)
+        if parallel_sp is not None:
+            # Refresh the worker pool's weights every N cycles only.
+            # Spin-up takes 2-3 s on Windows; doing it every cycle
+            # eats most of the parallel speedup on short cycles.
+            # In-between refreshes, workers play with slightly stale
+            # weights -- ok-ish since eps-exploration dominates the
+            # decision distribution anyway.
+            if cycle == 0 or cycle % cfg.pool_refresh_every == 0:
+                parallel_sp.set_model(
+                    cand_model.state_dict(),
+                    weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
+                    temperature=cfg.temperature, epsilon=eps)
+            sp_stats = collect_self_play_parallel(
+                parallel_sp, buffer, cfg.fights_per_cycle,
+                seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle)
+        else:
+            agent = agent_mod.GreedyVAgent(
+                cand_model, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
+                temperature=cfg.temperature, epsilon=eps)
+            sp_stats = collect_self_play(
+                agent, buffer, cfg.fights_per_cycle,
+                seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle)
+
         tr = train_steps(
             cand_model, optimizer, buffer,
-            cfg.train_steps_per_cycle, cfg.batch_size)
+            cfg.train_steps_per_cycle, cfg.batch_size,
+            grad_clip=cfg.grad_clip)
 
         record = {
             "cycle": cycle,
             "eps": eps,
-            "self_play": sp,
+            "self_play": sp_stats,
             "train": tr,
             "buffer_size": len(buffer),
         }
@@ -294,18 +370,21 @@ def main():
 
         # Pretty console line
         line = (f"cycle {cycle:>4} | eps={eps:.2f} | "
-                f"sp={sp['fights']} fights@{sp['fights_per_sec']:.1f}/s | "
+                f"sp={sp_stats['fights']} fights@{sp_stats['fights_per_sec']:.1f}/s | "
                 f"buf={len(buffer)} | "
                 f"loss={tr['loss']:.4f} mae={tr['mae']:.3f}")
         if "eval" in record:
             ev = record["eval"]
             line += f" | EVAL win={ev['win_rate']*100:.1f}% "
             line += "(PROMOTED)" if record.get("promoted") else "(no)"
-        print(line)
+        print(line, flush=True)
 
         cycle += 1
         if cfg.cycles > 0 and cycle >= cfg.cycles:
             break
+
+    if parallel_sp is not None:
+        parallel_sp.close()
 
 
 if __name__ == "__main__":
