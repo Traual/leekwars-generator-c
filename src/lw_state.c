@@ -13,10 +13,19 @@
 #include "lw_rng.h"
 #include "lw_util.h"
 #include "lw_effect.h"
+#include "lw_map.h"
+#include "lw_team.h"
+#include "lw_entity.h"
 
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>     /* malloc/calloc/free */
 #include <string.h>
+
+
+/* Forward decl for the effect-pool allocator (defined in lw_glue.c).
+ * Used by clone_remap_effect below. */
+LwEffect* lw_state_alloc_effect(struct LwState *state);
 
 
 /* ---- Forward declarations of cross-module helpers ------------------ *
@@ -68,7 +77,10 @@ int    lw_entity_get_effect_buffpower_value(struct LwEntity *e); /* sum of TYPE_
 
 /* state/Team.java */
 struct LwTeam* lw_team_create     (void);
-struct LwTeam* lw_team_clone      (const struct LwTeam *src, struct LwState *state);
+/* lw_team_clone implementation lives in lw_glue.c with a single-arg
+ * signature (the caller does the entity-pointer remapping). The decl
+ * uses the typedef name to match lw_team.h. */
+LwTeam* lw_team_clone             (const LwTeam *src);
 void   lw_team_set_id             (struct LwTeam *t, int id);
 int    lw_team_get_id             (const struct LwTeam *t);
 void   lw_team_add_entity         (struct LwTeam *t, struct LwEntity *e);
@@ -91,7 +103,7 @@ void   lw_team_add_flag           (struct LwTeam *t, int flag);
 struct LwMap* lw_map_generate_map (struct LwState *state, int context, int width, int height,
                                    int obstacle_count, struct LwTeam **teams, int n_teams,
                                    void *custom_map);
-struct LwMap* lw_map_clone        (const struct LwMap *src, struct LwState *state);
+/* lw_map_clone signature lives in lw_map.h (3-arg in-place variant). */
 struct LwCell* lw_map_get_cell    (const struct LwMap *m, int id);
 int    lw_map_can_use_attack      (struct LwMap *m, struct LwCell *from, struct LwCell *to, struct LwAttack *atk);
 int    lw_map_move_entity         (struct LwMap *m, struct LwEntity *e, struct LwCell *to);
@@ -273,19 +285,50 @@ void lw_state_init(LwState *self) {
  *       statistics = state.statistics;  registerManager = ...; ...
  *   }
  *
- * Stub: requires entity-clone hooks that aren't ported yet.  Mirrors
- * the bare structural fields but does NOT deep-clone entities/effects.
- * Callers needing a true snapshot should use the Cython binding's
- * higher-level clone path until the Entity port lands. */
+ * Deep snapshot of a fight state. The Cython binding allocates the
+ * destination LwState, then calls into here to populate it. Caller
+ * owns the destination memory; we own the heap blocks attached
+ * (entities, teams, effects, map). lw_state_free_clone() releases
+ * them.
+ *
+ * Pointer ownership and remapping rules:
+ *   - LwWeapon, LwChip, LwAttack: GLOBAL registries, shared by all
+ *     states. Pointers are copied as-is.
+ *   - LwEntity: each one is heap-allocated per state; we calloc a
+ *     fresh array and lw_entity_init_copy from src. Then we walk
+ *     each new entity and remap any pointer that referenced the old
+ *     state's objects (cell -> new map's same-id cell, m_owner -> new
+ *     entity by fid, state -> new state).
+ *   - LwEffect: pulled from a global pool (lw_state_alloc_effect);
+ *     we re-allocate fresh slots for the clone and remap their
+ *     caster/target/attack pointers.
+ *   - LwMap, LwTeam: heap-allocated per state. Map cells are POD;
+ *     entity_at_cell stores fids (stable across clones) so just
+ *     memcpy. Team entities[] needs fid-based pointer fixup.
+ *   - LwOrder: in-place struct on LwState; lw_order_copy already
+ *     does the fid lookup against the destination state.
+ *   - LwActions: in-place fixed-size struct; plain memcpy.
+ */
+
+/* Forward decls for helpers used below. */
+static struct LwEntity* clone_state_lookup_entity_by_fid(LwState *state, int fid);
+static struct LwCell*   clone_state_lookup_cell_by_id   (LwState *state, int cell_id);
+static struct LwEffect* clone_remap_effect              (LwState *new_state, const struct LwEffect *src);
+
+
 void lw_state_clone(LwState *self, const LwState *src) {
     if (!self || !src) return;
+
+    /* Start from a clean slate: zero-init scalars + pointer slots. */
     lw_state_init(self);
+
+    /* ---- 1. Scalars and embedded structs ----------------------------- */
 
     self->m_id                = src->m_id;
     self->m_state             = src->m_state;
     self->rng_n               = src->rng_n;
-    self->statistics          = src->statistics;
-    self->register_manager    = src->register_manager;
+    self->statistics          = src->statistics;        /* shared (opaque) */
+    self->register_manager    = src->register_manager;  /* shared (opaque) */
     self->full_type           = src->full_type;
     self->type                = src->type;
     self->context             = src->context;
@@ -293,12 +336,235 @@ void lw_state_clone(LwState *self, const LwState *src) {
     self->m_winteam           = src->m_winteam;
     self->m_start_farmer      = src->m_start_farmer;
     self->last_turn           = src->last_turn;
+    self->colossus_multiplier = src->colossus_multiplier;
     self->date                = src->date;
     memcpy(self->m_leek_datas, src->m_leek_datas, sizeof(self->m_leek_datas));
     self->execution_time      = src->execution_time;
     self->seed                = src->seed;
+    self->draw_check_life     = src->draw_check_life;
+    self->custom_map          = src->custom_map;        /* shared (opaque) */
+    self->listener            = src->listener;          /* shared (opaque) */
 
-    /* Entity / team / order / map deep clone NOT YET IMPLEMENTED. */
+    /* Action stream: fixed-size in-place struct. */
+    memcpy(&self->actions, &src->actions, sizeof(LwActions));
+
+    /* ---- 2. Allocate + deep-copy entities ---------------------------- */
+    /* We need entities to exist before the map clone (so cell.entity_at_cell
+     * fids resolve), before teams, and before order/initial_order remap.
+     * lw_entity_init_copy copies the bulk of the entity but leaves
+     * pointer fields (cell, m_owner, state, effects[]) referencing the
+     * SOURCE state's objects -- we fix them up below. */
+    self->n_entities = src->n_entities;
+    for (int i = 0; i < src->n_entities; i++) {
+        struct LwEntity *src_e = src->m_entities[i];
+        if (!src_e) { self->m_entities[i] = NULL; continue; }
+        struct LwEntity *new_e = (struct LwEntity*) calloc(1, sizeof(struct LwEntity));
+        if (!new_e) { self->m_entities[i] = NULL; continue; }
+        lw_entity_init_copy(new_e, src_e);
+        self->m_entities[i] = new_e;
+    }
+
+    /* ---- 3. Allocate + clone the map -------------------------------- */
+    /* lw_map_clone does memcpy + sets new_state. Cells are POD;
+     * entity_at_cell holds fids, stable across clones. */
+    if (src->map) {
+        struct LwMap *new_map = (struct LwMap*) calloc(1, sizeof(struct LwMap));
+        if (new_map) {
+            lw_map_clone(new_map, src->map, self);
+            self->map = new_map;
+        }
+    }
+
+    /* ---- 4. Remap entity pointer fields to the new state ------------ */
+    /* Each cloned entity's `cell` field still points into the old map;
+     * remap to the new map's cell with the same id. m_owner (Bulb's
+     * summoner) still points at the old entity; remap by fid. state
+     * also needs to point at the new self. */
+    for (int i = 0; i < self->n_entities; i++) {
+        struct LwEntity *e = self->m_entities[i];
+        if (!e) continue;
+        struct LwEntity *src_e = src->m_entities[i];
+
+        /* state pointer */
+        e->state = self;
+
+        /* cell pointer */
+        if (src_e && src_e->cell) {
+            e->cell = clone_state_lookup_cell_by_id(self, src_e->cell->id);
+        } else {
+            e->cell = NULL;
+        }
+
+        /* m_owner (bulb summoner) */
+        if (src_e && src_e->m_owner) {
+            int owner_fid = lw_entity_get_fid(src_e->m_owner);
+            e->m_owner = clone_state_lookup_entity_by_fid(self, owner_fid);
+        } else {
+            e->m_owner = NULL;
+        }
+
+        /* effects[] / launched_effects[]: lw_entity_init_copy explicitly
+         * does NOT copy these (Java behavior). They start empty here.
+         * We fill them in below from the source's effects, with
+         * caster/target pointer remapping. */
+        e->n_effects = 0;
+        e->n_launched_effects = 0;
+
+        /* AI / logs / fight / ai_file / m_register: opaque; the
+         * lw_entity_init_copy does NOT copy these. They start NULL,
+         * which matches Java's `new Leek(src)` behavior of leaving
+         * them unset on the copy. The fight runner re-attaches them
+         * via Entity.setState/setAI hooks. For replay/MCTS, we don't
+         * call those hooks again; the engine reads them via
+         * lw_entity_get_ai etc. so they need to be valid pointers or
+         * NULL.  Leaving NULL is safe -- AI dispatch code path
+         * already checks for NULL and is a no-op when not set. */
+    }
+
+    /* ---- 5. Re-clone effects on each entity ------------------------- */
+    /* Walk the source's effects[] / launched_effects[] for each entity
+     * and create fresh effect slots in the clone, with caster/target
+     * remapped to the new state's entities. */
+    for (int i = 0; i < src->n_entities; i++) {
+        struct LwEntity *src_e = src->m_entities[i];
+        struct LwEntity *new_e = self->m_entities[i];
+        if (!src_e || !new_e) continue;
+
+        /* effects[] -- effects acting ON this entity */
+        for (int k = 0; k < src_e->n_effects; k++) {
+            struct LwEffect *new_eff = clone_remap_effect(self, src_e->effects[k]);
+            if (new_eff && new_e->n_effects < LW_ENTITY_MAX_EFFECTS) {
+                new_e->effects[new_e->n_effects++] = new_eff;
+            }
+        }
+        /* launched_effects[] -- effects this entity launched on others */
+        for (int k = 0; k < src_e->n_launched_effects; k++) {
+            struct LwEffect *new_eff = clone_remap_effect(self, src_e->launched_effects[k]);
+            if (new_eff && new_e->n_launched_effects < LW_ENTITY_MAX_LAUNCHED_EFFECTS) {
+                new_e->launched_effects[new_e->n_launched_effects++] = new_eff;
+            }
+        }
+    }
+
+    /* ---- 6. Allocate + remap teams ---------------------------------- */
+    /* lw_team_clone does memcpy of the team struct but its entities[]
+     * array still holds OLD entity pointers. We patch those by fid
+     * lookup against the new state. */
+    self->n_teams = src->n_teams;
+    for (int i = 0; i < src->n_teams; i++) {
+        if (!src->teams[i]) { self->teams[i] = NULL; continue; }
+        LwTeam *new_team = lw_team_clone(src->teams[i]);
+        if (!new_team) { self->teams[i] = NULL; continue; }
+        /* src->teams[i] is `struct LwTeam *` per the in-state declaration
+         * but the typedef LwTeam is what carries the field layout; cast
+         * the source pointer through the typedef so MSVC accepts the
+         * member access. */
+        LwTeam *src_team = (LwTeam *) src->teams[i];
+        for (int k = 0; k < new_team->n_entities; k++) {
+            LwEntity *src_member = src_team->entities[k];
+            if (src_member) {
+                new_team->entities[k] = clone_state_lookup_entity_by_fid(
+                    self, lw_entity_get_fid(src_member));
+            } else {
+                new_team->entities[k] = NULL;
+            }
+        }
+        self->teams[i] = new_team;
+    }
+
+    /* ---- 7. Initial order: same-fid lookup ------------------------- */
+    self->n_initial_order = src->n_initial_order;
+    for (int i = 0; i < src->n_initial_order; i++) {
+        struct LwEntity *src_e = src->initial_order[i];
+        if (src_e) {
+            self->initial_order[i] = clone_state_lookup_entity_by_fid(
+                self, lw_entity_get_fid(src_e));
+        } else {
+            self->initial_order[i] = NULL;
+        }
+    }
+
+    /* ---- 8. Order: helper does fid-based remap --------------------- */
+    /* lw_order_copy iterates src.leeks[], looks up each by fid in
+     * `state` (which we pass as `self`), so this works only after
+     * step 2 populated self->m_entities. */
+    lw_order_copy(&self->order, &src->order, self);
+    /* lw_order_copy resets `turn` to 1 to mirror a Java bug; restore
+     * the actual turn so MCTS rollouts continue from the snapshot. */
+    self->order.turn = src->order.turn;
+}
+
+
+/* Helper: same as lw_state_get_entity but inlined for clone use. */
+static struct LwEntity* clone_state_lookup_entity_by_fid(LwState *state, int fid) {
+    if (!state) return NULL;
+    for (int i = 0; i < state->n_entities; i++) {
+        if (state->m_entities[i] && lw_entity_get_fid(state->m_entities[i]) == fid) {
+            return state->m_entities[i];
+        }
+    }
+    return NULL;
+}
+
+/* Helper: cells live inline in map.cells[]; lookup is O(1) by id. */
+static struct LwCell* clone_state_lookup_cell_by_id(LwState *state, int cell_id) {
+    if (!state || !state->map) return NULL;
+    if (cell_id < 0 || cell_id >= LW_MAP_MAX_CELLS) return NULL;
+    return &state->map->cells[cell_id];
+}
+
+/* Helper: clone one effect into the new state's pool, remapping
+ * caster/target/attack pointers via the new state's entity table.
+ * Returns NULL if the source effect is NULL or pool allocation
+ * fails. */
+static struct LwEffect* clone_remap_effect(LwState *new_state, const struct LwEffect *src) {
+    if (!src || !new_state) return NULL;
+    struct LwEffect *dst = lw_state_alloc_effect(new_state);
+    if (!dst) return NULL;
+    /* Plain memcpy of the effect struct. */
+    memcpy(dst, src, sizeof(LwEffect));
+    /* Remap caster/target. attack is a global registry pointer
+     * (LwWeapon/LwChip's bundled LwAttack), so it stays as-is. */
+    if (src->caster) {
+        dst->caster = clone_state_lookup_entity_by_fid(
+            new_state, lw_entity_get_fid(src->caster));
+    }
+    if (src->target) {
+        dst->target = clone_state_lookup_entity_by_fid(
+            new_state, lw_entity_get_fid(src->target));
+    }
+    return dst;
+}
+
+
+/* Free the heap allocations attached to a cloned state. Call this
+ * only on states produced by lw_state_clone -- never on states owned
+ * by a Generator (those are freed by lw_generator_dispose).
+ *
+ * Effects come from the global pool, so we don't free them
+ * individually -- the pool wraps around. Map and entities are heap
+ * blocks we owned. Teams ditto. */
+void lw_state_free_clone(LwState *self) {
+    if (!self) return;
+    if (self->map) {
+        free(self->map);
+        self->map = NULL;
+    }
+    for (int i = 0; i < self->n_entities; i++) {
+        if (self->m_entities[i]) {
+            free(self->m_entities[i]);
+            self->m_entities[i] = NULL;
+        }
+    }
+    self->n_entities = 0;
+    for (int i = 0; i < self->n_teams; i++) {
+        if (self->teams[i]) {
+            free(self->teams[i]);
+            self->teams[i] = NULL;
+        }
+    }
+    self->n_teams = 0;
+    /* effects[] live in the global pool; nothing to free. */
 }
 
 

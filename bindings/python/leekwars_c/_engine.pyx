@@ -23,7 +23,7 @@ Minimal API focused on parity testing:
 
 from libc.stdint cimport int64_t, uint64_t
 from libc.stdlib cimport malloc, free, calloc
-from libc.string cimport memset, strncpy
+from libc.string cimport memset, memcpy, strncpy
 
 
 # ===================== C declarations ============================
@@ -73,6 +73,8 @@ cdef extern from "lw_state.h":
         int                   type
         int                   seed
         int                   draw_check_life
+    void lw_state_clone(LwState *self, const LwState *src)
+    void lw_state_free_clone(LwState *self)
 
 
 cdef extern from "lw_outcome.h":
@@ -369,6 +371,7 @@ cdef class Engine:
     cdef object      _ai_callback     # Python callable
     cdef list        _registered_weapons  # keep alive
     cdef list        _registered_chips    # keep alive
+    cdef bint        _is_clone        # True if state was filled via clone()
 
     def __cinit__(self):
         lw_generator_init(&self.generator)
@@ -379,6 +382,7 @@ cdef class Engine:
         self._ai_callback = None
         self._registered_weapons = []
         self._registered_chips = []
+        self._is_clone = False
         # Sensible defaults
         self.scenario.max_turns = 30
         self.scenario.type = LW_FIGHT_TYPE_SOLO
@@ -388,6 +392,52 @@ cdef class Engine:
         # via set_ai_callback below.
         lw_generator_set_ai_dispatch(&self.generator, _ai_trampoline,
                                       <void*>self)
+
+    def __dealloc__(self):
+        # Clones own heap blocks (entities/teams/map) attached to the
+        # state; release them. Non-clone engines have those blocks owned
+        # by the generator and freed elsewhere.
+        if self._is_clone:
+            lw_state_free_clone(&self.state)
+
+    def clone(self):
+        """Return a deep snapshot of this engine's current state.
+
+        The returned Engine shares the global weapon/chip/bulb
+        registries (immutable post-setup) but has its own copy of all
+        entities, teams, effects, the map, and the action stream.
+        Atomic actions (fire_weapon / use_chip / move_toward) applied
+        on the clone do not affect the parent.
+
+        Limitations:
+          * The clone has no fight runner attached -- you can't call
+            ``run()`` on it. Use it for state queries + atomic action
+            rollouts (typical MCTS / beam-search use case).
+          * Effects come from a global pool with bounded capacity; for
+            very deep search trees with thousands of in-flight clones,
+            the pool may wrap. For the AlphaZero training workload
+            (~hundreds of clones in flight) this is fine.
+        """
+        cdef Engine c = Engine()
+        # The fresh Engine's state was zero-init'd by __cinit__; we
+        # overwrite it with the deep clone of self.state. The C helper
+        # heap-allocates entities/teams/map and attaches them. The
+        # __dealloc__ above releases them when the clone is GC'd.
+        lw_state_clone(&c.state, &self.state)
+        # Outcome is a POD struct with the winner / duration / log
+        # entries from the last run() call -- copy verbatim so
+        # `clone.winner` and friends report the same values as the
+        # parent. New atomic actions on the clone don't update outcome
+        # (only run() writes to it), which is fine: outcome is a
+        # post-fight snapshot, and clones we make for rollouts are
+        # query-only on the outcome.
+        memcpy(&c.outcome, &self.outcome, sizeof(LwOutcome))
+        c._is_clone = True
+        # Share the registries (Python lists). They're immutable after
+        # setup, so cloning them would just waste memory.
+        c._registered_weapons = self._registered_weapons
+        c._registered_chips = self._registered_chips
+        return c
 
     def set_ai_callback(self, callback):
         """Register a Python function called once per entity per turn.

@@ -162,9 +162,21 @@ void lw_state_init(LwState *self);
 /* public State(State state) -- deep-copy constructor.  Walks the source
  * state and rebuilds entities, effects, teams, order, map.
  *
- * NOTE: In C this requires a per-entity clone hook from lw_entity.c.
- * Stub for now -- raises a NULL deref if called before that lands. */
+ * Caller is responsible for the destination LwState memory; the clone
+ * heap-allocates its own entities/teams/map and attaches them. Pair
+ * with lw_state_free_clone() to release them.
+ *
+ * Effects come from the shared global pool (lw_state_alloc_effect),
+ * which wraps around at LW_EFFECT_POOL_CAP. For typical MCTS workloads
+ * (~10 active effects/state, ~hundreds of clones in flight), the pool
+ * has plenty of headroom. */
 void lw_state_clone(LwState *self, const LwState *src);
+
+/* Release the heap blocks attached to a cloned state (entities, teams,
+ * map). The LwState struct itself is owned by the caller. NEVER call
+ * this on a state still owned by a Generator -- the Generator frees
+ * them on dispose. */
+void lw_state_free_clone(LwState *self);
 
 
 /* ---- Field accessors -------------------------------------------- */
