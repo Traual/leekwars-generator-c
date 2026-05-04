@@ -77,6 +77,14 @@ cdef extern from "lw_state.h":
     void lw_state_free_clone(LwState *self)
 
 
+cdef extern from "lw_features.h":
+    int LW_FEAT_TOTAL
+    int LW_FEAT_SLOTS
+    int LW_FEAT_FIELDS_PER_SLOT
+    int lw_features_extract_v(const LwState *state, int active_idx,
+                               float *out, int out_len)
+
+
 cdef extern from "lw_outcome.h":
     int LW_OUTCOME_MAX_LOGS
 
@@ -438,6 +446,34 @@ cdef class Engine:
         c._registered_weapons = self._registered_weapons
         c._registered_chips = self._registered_chips
         return c
+
+    def extract_v_features(self, int active_idx, float[::1] out):
+        """Fill ``out`` (a contiguous float32 buffer of length 256)
+        with the V-network feature vector for ``active_idx``.
+
+        Layout: 16 entity slots * 16 fields each. Slot 0 is always
+        the active entity; remaining slots walk state.m_entities[]
+        in insertion order, skipping the active. See lw_features.h
+        for the full per-slot field list.
+
+        Returns the number of slots actually populated (1..16).
+
+        Caller pre-allocates the buffer:
+
+            >>> import numpy as np
+            >>> buf = np.zeros(256, dtype=np.float32)
+            >>> n = eng.extract_v_features(0, buf)
+        """
+        if out.shape[0] < LW_FEAT_TOTAL:
+            raise ValueError(
+                f"out buffer too small: got {out.shape[0]}, need {LW_FEAT_TOTAL}"
+            )
+        return lw_features_extract_v(&self.state, active_idx,
+                                       &out[0], out.shape[0])
+
+    def feature_dim(self):
+        """Return the size (in floats) of the V-feature buffer."""
+        return LW_FEAT_TOTAL
 
     def set_ai_callback(self, callback):
         """Register a Python function called once per entity per turn.
