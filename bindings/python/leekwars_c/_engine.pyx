@@ -81,8 +81,14 @@ cdef extern from "lw_features.h":
     int LW_FEAT_TOTAL
     int LW_FEAT_SLOTS
     int LW_FEAT_FIELDS_PER_SLOT
+    int LW_FEAT_SPATIAL_C
+    int LW_FEAT_SPATIAL_H
+    int LW_FEAT_SPATIAL_W
+    int LW_FEAT_SPATIAL_TOTAL
     int lw_features_extract_v(const LwState *state, int active_idx,
                                float *out, int out_len)
+    int lw_features_extract_spatial(const LwState *state, int active_idx,
+                                      float *out, int out_len)
 
 
 cdef extern from "lw_outcome.h":
@@ -474,6 +480,26 @@ cdef class Engine:
     def feature_dim(self):
         """Return the size (in floats) of the V-feature buffer."""
         return LW_FEAT_TOTAL
+
+    def extract_spatial_features(self, int active_idx, float[::1] out):
+        """Fill ``out`` (a contiguous float32 buffer of length 2520)
+        with the (C=4, H=18, W=35) spatial tensor: walkability +
+        my/enemy/dead occupancy. Layout is NCHW (channel outermost),
+        so the buffer can be reshaped to (4, 18, 35) and fed to a
+        PyTorch Conv2d directly.
+
+        Returns 1 on success, 0 on failure (e.g., bad active_idx).
+        """
+        if out.shape[0] < LW_FEAT_SPATIAL_TOTAL:
+            raise ValueError(
+                f"out buffer too small: got {out.shape[0]}, need {LW_FEAT_SPATIAL_TOTAL}"
+            )
+        return lw_features_extract_spatial(&self.state, active_idx,
+                                             &out[0], out.shape[0])
+
+    def spatial_dim(self):
+        """Return the (C, H, W) shape of the spatial tensor."""
+        return (LW_FEAT_SPATIAL_C, LW_FEAT_SPATIAL_H, LW_FEAT_SPATIAL_W)
 
     def set_ai_callback(self, callback):
         """Register a Python function called once per entity per turn.

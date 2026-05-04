@@ -46,6 +46,27 @@
 #define LW_FEAT_TOTAL              (LW_FEAT_SLOTS * LW_FEAT_FIELDS_PER_SLOT)   /* 256 */
 
 
+/* Spatial channels for the Hybrid network's CNN branch.
+ *
+ * Shape: (C, H, W) = (4, 18, 35) -- the 18x35 layout matches the
+ * leek-wars-client's cellToXY math (mod = 2*tilesX - 1 = 35,
+ * height = 18). Channel layout:
+ *
+ *   0: walkable (1 if cell is walkable, 0 otherwise / out-of-diamond)
+ *   1: my-team alive entity present (1) / 0
+ *   2: enemy alive entity present     (1) / 0
+ *   3: dead entity here               (1) / 0  (resurrect targeting)
+ *
+ * Total floats per call: 4 * 18 * 35 = 2520.
+ * The buffer must be ROW-MAJOR with channel-as-outermost (C, H, W),
+ * which is the layout PyTorch's Conv2D expects after a torch.from_numpy.
+ */
+#define LW_FEAT_SPATIAL_C          4
+#define LW_FEAT_SPATIAL_H          18
+#define LW_FEAT_SPATIAL_W          35
+#define LW_FEAT_SPATIAL_TOTAL      (LW_FEAT_SPATIAL_C * LW_FEAT_SPATIAL_H * LW_FEAT_SPATIAL_W)
+
+
 /* Fill `out` (length >= LW_FEAT_TOTAL) with the feature vector for
  * the given active entity. Caller is responsible for allocating
  * `out` and zeroing it (the function only writes used slots).
@@ -57,6 +78,17 @@
  * Returns the number of slots actually populated (1..16).
  */
 int lw_features_extract_v(const LwState *state, int active_idx, float *out, int out_len);
+
+
+/* Fill `out` (length >= LW_FEAT_SPATIAL_TOTAL) with the spatial
+ * tensor described above, oriented from ``active_idx``'s team
+ * perspective (channels 1 vs 2 distinguish "us" vs "them").
+ *
+ * Returns 0 on failure (bad args / buffer too small) or 1 on
+ * success. The buffer is fully zeroed before writing.
+ */
+int lw_features_extract_spatial(const LwState *state, int active_idx,
+                                  float *out, int out_len);
 
 
 #endif /* LW_FEATURES_H */

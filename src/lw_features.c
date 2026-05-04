@@ -9,6 +9,7 @@
 
 #include "lw_entity.h"
 #include "lw_cell.h"
+#include "lw_map.h"
 
 #include <string.h>
 
@@ -80,6 +81,93 @@ static void fill_slot(float *slot, const struct LwEntity *e,
     slot[13] = (float)lw_entity_get_frequency (e) / LW_FEAT_NORM_FREQ;        /* frequency */
     slot[14] = cell_x_norm;                                                   /* cell_x */
     slot[15] = cell_y_norm;                                                   /* cell_y */
+}
+
+
+/* Map a cell id to its (hx, hy) position in the 18x35 layout that
+ * matches the leek-wars-client's cellToXY rendering. The diamond
+ * has ~613 cells, packed into the 18 * 35 = 630 grid with a few
+ * unused corners. */
+static inline void cell_to_grid(int cell_id, int *hx, int *hy) {
+    /* mod = 2 * tilesX - 1 = 35 for an 18x18 map. */
+    int mod = 35;
+    *hx = cell_id % mod;     /* 0..34 */
+    *hy = cell_id / mod;     /* 0..17 */
+}
+
+
+int lw_features_extract_spatial(const LwState *state, int active_idx,
+                                  float *out, int out_len) {
+    if (!state || !out) return 0;
+    if (out_len < LW_FEAT_SPATIAL_TOTAL) return 0;
+
+    /* Channels are stored in NCHW order: c * H * W + y * W + x. */
+    const int H = LW_FEAT_SPATIAL_H;
+    const int W = LW_FEAT_SPATIAL_W;
+    const int CH_PLANE = H * W;
+
+    /* Zero the whole buffer first; cells outside the diamond stay 0. */
+    memset(out, 0, sizeof(float) * (size_t)LW_FEAT_SPATIAL_TOTAL);
+
+    LwState *st = (LwState*)state;
+
+    /* Identify active entity's team to orient us-vs-them channels. */
+    int my_team = -2;
+    if (active_idx >= 0 && active_idx < st->n_entities) {
+        const struct LwEntity *active = st->m_entities[active_idx];
+        if (active) my_team = lw_entity_get_team(active);
+    }
+
+    /* Channel 0: walkability map. We iterate every cell of the live
+     * map (which the engine has already populated with obstacle info
+     * via setObstacle) and write 1.0 for walkable. */
+    struct LwMap *map = lw_state_get_map(st);
+    if (map) {
+        /* The map exposes its cells directly; we iterate by id and
+         * skip ids that fall outside the H*W grid (shouldn't happen
+         * but guards against edge cases). */
+        int nb = map->nb_cells;
+        if (nb > LW_MAP_MAX_CELLS) nb = LW_MAP_MAX_CELLS;
+        for (int cid = 0; cid < nb; cid++) {
+            int hx, hy;
+            cell_to_grid(cid, &hx, &hy);
+            if (hx < 0 || hx >= W || hy < 0 || hy >= H) continue;
+            const struct LwCell *cell = &map->cells[cid];
+            /* Some cells may be unallocated (id collision with stub
+             * cells); detect via id field == 0 + non-zero index. */
+            if (cell->walkable) {
+                out[0 * CH_PLANE + hy * W + hx] = 1.0f;
+            }
+        }
+    }
+
+    /* Channels 1-3: per-entity occupancy. We walk every entity
+     * (alive or dead, including summons up to n_entities) and write
+     * to the appropriate channel based on (alive, same-team). */
+    for (int i = 0; i < st->n_entities; i++) {
+        const struct LwEntity *e = st->m_entities[i];
+        if (!e) continue;
+        const struct LwCell *cell = lw_entity_get_cell((struct LwEntity*)e);
+        if (!cell) continue;
+        int hx, hy;
+        cell_to_grid(cell->id, &hx, &hy);
+        if (hx < 0 || hx >= W || hy < 0 || hy >= H) continue;
+
+        int alive = lw_entity_is_alive(e);
+        int same_team = (lw_entity_get_team(e) == my_team) ? 1 : 0;
+
+        int channel;
+        if (!alive) {
+            channel = 3;                  /* dead */
+        } else if (same_team) {
+            channel = 1;                  /* my team */
+        } else {
+            channel = 2;                  /* enemy */
+        }
+        out[channel * CH_PLANE + hy * W + hx] = 1.0f;
+    }
+
+    return 1;
 }
 
 
