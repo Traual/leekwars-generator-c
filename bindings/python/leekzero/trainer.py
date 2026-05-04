@@ -54,13 +54,29 @@ from leekzero.selfplay import (
     ReplayBuffer, make_1v1_pistol_flame, play_one_fight,
     WEAPON_PISTOL, CHIP_FLAME,
 )
+from leekzero.scenarios import (
+    make_1v1_stage1_static, make_1v1_stage2_movement_obstacles,
+)
 from leekzero.parallel import ParallelSelfPlay
+
+
+# Scenario registry: --scenario <name> picks one of these.
+SCENARIOS = {
+    "stage1": ("leekzero.scenarios:make_1v1_stage1_static",
+                make_1v1_stage1_static),
+    "stage2": ("leekzero.scenarios:make_1v1_stage2_movement_obstacles",
+                make_1v1_stage2_movement_obstacles),
+    # legacy alias for the original selfplay scenario
+    "legacy_1v1": ("leekzero.selfplay:make_1v1_pistol_flame",
+                    make_1v1_pistol_flame),
+}
 
 
 @dataclass
 class Config:
     """Hyper-parameters for the training run. Saved alongside the
     checkpoint so we can reproduce a run after the fact."""
+    scenario: str = "stage1"           # key into SCENARIOS dict
     cycles: int = 0                    # 0 = run forever
     fights_per_cycle: int = 200
     train_steps_per_cycle: int = 200
@@ -111,14 +127,19 @@ def save_model(model: nn.Module, path: Path) -> None:
 def collect_self_play(agent: agent_mod.GreedyVAgent,
                        buffer: ReplayBuffer,
                        n_fights: int,
-                       seed_base: int) -> dict:
+                       seed_base: int,
+                       scenario_fn=None) -> dict:
     """Single-process self-play: run ``n_fights`` fights, push
     samples into the buffer, and return summary stats."""
     t0 = time.perf_counter()
     n_samples = 0
     winners: dict[int, int] = {}
     for k in range(n_fights):
-        s, l, w = play_one_fight(agent, seed=seed_base + k)
+        if scenario_fn is None:
+            s, l, w = play_one_fight(agent, seed=seed_base + k)
+        else:
+            s, l, w = play_one_fight(agent, scenario=scenario_fn,
+                                       seed=seed_base + k)
         buffer.push(s, l)
         n_samples += s.shape[0]
         winners[w] = winners.get(w, 0) + 1
@@ -192,7 +213,8 @@ def train_steps(model: MLPv1,
 
 def eval_match(candidate: MLPv1, opponent: MLPv1, n_fights: int,
                 seed_base: int = 1_000_000,
-                eval_temperature: float = 0.1) -> dict:
+                eval_temperature: float = 0.1,
+                scenario_fn=None) -> dict:
     """Play ``n_fights`` symmetric 1v1s: candidate as team 1, opponent
     as team 2 for the first half, then swap. Returns win-rate of
     candidate.
@@ -215,9 +237,10 @@ def eval_match(candidate: MLPv1, opponent: MLPv1, n_fights: int,
     # cb-driven flow without hot-swapping mid-fight. Easy hack: build
     # one agent that picks model based on entity team.
     # First half: candidate is team 1.
+    sc = scenario_fn if scenario_fn is not None else make_1v1_pistol_flame
     for k in range(n_fights):
         is_cand_team1 = (k < half)
-        eng = make_1v1_pistol_flame(seed=seed_base + k)
+        eng = sc(seed=seed_base + k)
         ag_cand = agent_mod.GreedyVAgent(
             candidate, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
             temperature=eval_temperature, epsilon=0.0,
@@ -282,6 +305,10 @@ def main():
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--buffer",    type=int, default=200_000,
                     help="replay buffer capacity in samples")
+    p.add_argument("--scenario",  default="stage1",
+                    choices=list(SCENARIOS.keys()),
+                    help="curriculum stage: stage1 (fixed map) or "
+                         "stage2 (random spawn + obstacles)")
     args = p.parse_args()
 
     cfg = Config(
@@ -292,7 +319,10 @@ def main():
         n_workers=args.workers, grad_clip=args.grad_clip,
         buffer_capacity=args.buffer,
         pool_refresh_every=args.pool_refresh_every,
+        scenario=args.scenario,
     )
+    scenario_path, scenario_fn = SCENARIOS[cfg.scenario]
+    print(f"[trainer] scenario = {cfg.scenario} -> {scenario_path}")
     out = Path(cfg.out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "meta.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -318,7 +348,9 @@ def main():
     # set_model() at the top of each cycle.
     parallel_sp: Optional[ParallelSelfPlay] = None
     if cfg.n_workers > 0:
-        parallel_sp = ParallelSelfPlay(n_workers=cfg.n_workers)
+        parallel_sp = ParallelSelfPlay(
+            n_workers=cfg.n_workers,
+            scenario_fn_path=scenario_path)
         print(f"[trainer] parallel self-play with {cfg.n_workers} workers")
 
     cycle = 0
@@ -346,7 +378,8 @@ def main():
                 temperature=cfg.temperature, epsilon=eps)
             sp_stats = collect_self_play(
                 agent, buffer, cfg.fights_per_cycle,
-                seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle)
+                seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle,
+                scenario_fn=scenario_fn)
 
         tr = train_steps(
             cand_model, optimizer, buffer,
@@ -362,7 +395,8 @@ def main():
         }
 
         if cfg.eval_every > 0 and cycle > 0 and cycle % cfg.eval_every == 0:
-            ev = eval_match(cand_model, best_model, cfg.eval_fights)
+            ev = eval_match(cand_model, best_model, cfg.eval_fights,
+                              scenario_fn=scenario_fn)
             record["eval"] = ev
             if ev["win_rate"] >= cfg.eval_promote_threshold:
                 save_model(cand_model, best_path)
