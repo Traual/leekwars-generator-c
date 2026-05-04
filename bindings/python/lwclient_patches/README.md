@@ -106,3 +106,81 @@ reverse-proxy in `replay_serve.py`:
 
 `DEV` is already defined in this file as `port === '8080'`, which is
 the port `replay_serve.py` listens on by default.
+
+### 5. `component/player/game/game.ts` — auto-equip weapons
+
+Real Leek Wars fights have a SET_WEAPON action emitted by LeekScript's
+`setWeapon()` call before the AI fires. Our local replay path skips
+the SET_WEAPON action entirely (the engine pre-equips silently to
+match upstream Python's no-set-weapon test mode). The unmodified
+client crashes the first time a USE_WEAPON action arrives because
+`leek.weapon` is null and the draw loop NPEs on `leek.weapon.id`.
+
+Two patches in `game.ts`:
+
+(a) In the action-stream pre-scan (~line 690), add USE_WEAPON to the
+    `weaponsTaken` collector so weapon textures get preloaded, and
+    also pre-add every leek's first weapon as a belt-and-braces:
+
+```diff
++				case ActionType.USE_WEAPON:
++				case ActionType.USE_WEAPON_OLD: {
++					if (this.currentPlayer != null) {
++						const leek = this.data.leeks.find(l => l.id === this.currentPlayer)
++						const ws = leek && leek.weapons
++						if (ws && ws.length > 0) {
++							const item = LeekWars.items[ws[0]]
++							if (item) {
++								const cls_id = parseInt(item.params, 10)
++								if (!isNaN(cls_id)) weaponsTaken.add(cls_id)
++							}
++						}
++					}
++					break
++				}
++			}
++			if (action.type === ActionType.LEEK_TURN) {
++				this.currentPlayer = action.params[1]
++			}
++		}
++		this.currentPlayer = null
++		for (const leek of this.data.leeks) {
++			if (leek.weapons) {
++				for (const w of leek.weapons) {
++					const item = LeekWars.items[w]
++					if (item) {
++						const cls_id = parseInt(item.params, 10)
++						if (!isNaN(cls_id)) weaponsTaken.add(cls_id)
++					}
++				}
++			}
++		}
+```
+
+(b) In the USE_WEAPON action handler (~line 1264), auto-equip the
+    leek's first weapon if `leek.weapon` is still null:
+
+```diff
+ 			const leek = this.leeks[this.currentPlayer!] as Leek
++			if (leek.weapon == null) {
++				const fight_leek = this.data.leeks.find(l => l.id === leek.id)
++				const ws = fight_leek && fight_leek.weapons
++				if (ws && ws.length > 0) {
++					if (leek.fish) {
++						leek.setWeapon(new Fish(this))
++					} else {
++						const item = LeekWars.items[ws[0]]
++						const cls_id = item ? parseInt(item.params, 10) : NaN
++						const cls = !isNaN(cls_id) ? WEAPONS[cls_id - 1] : null
++						if (cls) leek.setWeapon(new cls(this))
++					}
++				}
++			}
+ 			const weapon_template = LeekWars.weapons[LeekWars.items[leek.weapon!.id].params]
+```
+
+`fight_leek.weapons[0]` is the *catalogue item id* (e.g. 37 for pistol),
+NOT the weapon class id. The WEAPONS class table is indexed by class id
+(1 = Pistol, 2 = MachineGun, ...), and `LeekWars.items[item_id].params`
+maps the two — without that indirection, item 37 (pistol) would resolve
+to `WEAPONS[36]` (Odachi).
