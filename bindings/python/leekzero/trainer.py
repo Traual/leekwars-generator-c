@@ -48,10 +48,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))                  # ``leekwars_c``
 sys.path.insert(0, "C:/Users/aurel/Desktop/leekwars_generator_python")
 
-from leekzero.model import MLPv1, FEATURE_DIM
+from leekzero.model import MLPv1, HybridV1, FEATURE_DIM
 from leekzero import agent as agent_mod
 from leekzero.selfplay import (
-    ReplayBuffer, make_1v1_pistol_flame, play_one_fight,
+    ReplayBuffer, HybridReplayBuffer,
+    make_1v1_pistol_flame, play_one_fight, play_one_fight_hybrid,
     WEAPON_PISTOL, CHIP_FLAME,
 )
 from leekzero.scenarios import (
@@ -77,6 +78,7 @@ class Config:
     """Hyper-parameters for the training run. Saved alongside the
     checkpoint so we can reproduce a run after the fact."""
     scenario: str = "stage1"           # key into SCENARIOS dict
+    model_kind: str = "mlp"            # "mlp" (MLPv1) or "hybrid" (HybridV1)
     cycles: int = 0                    # 0 = run forever
     fights_per_cycle: int = 200
     train_steps_per_cycle: int = 200
@@ -111,8 +113,14 @@ def seed_all(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def load_or_init_model(path: Path) -> MLPv1:
-    m = MLPv1()
+def make_model(kind: str):
+    if kind == "hybrid":
+        return HybridV1()
+    return MLPv1()
+
+
+def load_or_init_model(path: Path, kind: str = "mlp"):
+    m = make_model(kind)
     if path.is_file():
         m.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
         print(f"  warm-start loaded from {path}")
@@ -152,48 +160,85 @@ def collect_self_play(agent: agent_mod.GreedyVAgent,
 
 
 def collect_self_play_parallel(sp: ParallelSelfPlay,
-                                 buffer: ReplayBuffer,
+                                 buffer,
                                  n_fights: int,
                                  seed_base: int) -> dict:
-    """Multi-process self-play via the worker pool. Same return
-    shape as ``collect_self_play``."""
+    """Multi-process self-play via the worker pool. Routes through
+    the buffer's appropriate push() based on the configured
+    model_kind on the pool."""
     t0 = time.perf_counter()
-    states, labels, winners = sp.play_batch(n_fights, seed_base=seed_base)
-    buffer.push(states, labels)
+    if sp.model_kind == "hybrid":
+        ent, spt, labels, winners = sp.play_batch(n_fights, seed_base=seed_base)
+        buffer.push(ent, spt, labels)
+        n_samples = ent.shape[0]
+    else:
+        states, labels, winners = sp.play_batch(n_fights, seed_base=seed_base)
+        buffer.push(states, labels)
+        n_samples = states.shape[0]
     win_counts: dict[int, int] = {}
     for w in winners:
         win_counts[w] = win_counts.get(w, 0) + 1
     return {
         "fights":  n_fights,
-        "samples": states.shape[0],
+        "samples": n_samples,
         "winners": win_counts,
         "fights_per_sec": n_fights / max(time.perf_counter() - t0, 1e-9),
     }
 
 
-def train_steps(model: MLPv1,
+def collect_self_play_hybrid(agent, buffer: HybridReplayBuffer,
+                                n_fights: int, seed_base: int,
+                                scenario_fn=None) -> dict:
+    """Single-process hybrid self-play. Same return shape as
+    ``collect_self_play``."""
+    t0 = time.perf_counter()
+    n_samples = 0
+    winners: dict[int, int] = {}
+    sc = scenario_fn if scenario_fn is not None else make_1v1_pistol_flame
+    for k in range(n_fights):
+        ent, spt, labels, w = play_one_fight_hybrid(
+            agent, scenario=sc, seed=seed_base + k)
+        buffer.push(ent, spt, labels)
+        n_samples += ent.shape[0]
+        winners[w] = winners.get(w, 0) + 1
+    return {
+        "fights":  n_fights,
+        "samples": n_samples,
+        "winners": winners,
+        "fights_per_sec": n_fights / max(time.perf_counter() - t0, 1e-9),
+    }
+
+
+def train_steps(model,
                  optimizer: torch.optim.Optimizer,
-                 buffer: ReplayBuffer,
+                 buffer,
                  n_steps: int,
                  batch_size: int,
                  grad_clip: float = 0.0) -> dict:
     """Run ``n_steps`` SGD updates on samples drawn from ``buffer``.
-    Returns mean loss + value-prediction MAE.
 
-    With ``grad_clip > 0`` we clip the global L2 grad norm before
-    stepping (standard RL stability guard rail; default 1.0).
+    Dispatches on ``isinstance(buffer, HybridReplayBuffer)`` to feed
+    the network either (entity,) or (spatial, entity).
     """
     if len(buffer) < batch_size:
         return {"steps": 0, "loss": float("nan"), "mae": float("nan")}
+    is_hybrid = isinstance(buffer, HybridReplayBuffer)
     model.train()
     losses = []
     maes = []
     t0 = time.perf_counter()
     for _ in range(n_steps):
-        s, l = buffer.sample(batch_size)
-        x = torch.from_numpy(s)
-        y = torch.from_numpy(l)
-        v = model(x)
+        if is_hybrid:
+            ent, spt, l = buffer.sample(batch_size)
+            x_ent = torch.from_numpy(ent)
+            x_spt = torch.from_numpy(spt)
+            y = torch.from_numpy(l)
+            v = model(x_spt, x_ent)
+        else:
+            s, l = buffer.sample(batch_size)
+            x = torch.from_numpy(s)
+            y = torch.from_numpy(l)
+            v = model(x)
         loss = torch.nn.functional.mse_loss(v, y)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
@@ -211,10 +256,11 @@ def train_steps(model: MLPv1,
     }
 
 
-def eval_match(candidate: MLPv1, opponent: MLPv1, n_fights: int,
+def eval_match(candidate, opponent, n_fights: int,
                 seed_base: int = 1_000_000,
                 eval_temperature: float = 0.1,
-                scenario_fn=None) -> dict:
+                scenario_fn=None,
+                model_kind: str = "mlp") -> dict:
     """Play ``n_fights`` symmetric 1v1s: candidate as team 1, opponent
     as team 2 for the first half, then swap. Returns win-rate of
     candidate.
@@ -238,14 +284,16 @@ def eval_match(candidate: MLPv1, opponent: MLPv1, n_fights: int,
     # one agent that picks model based on entity team.
     # First half: candidate is team 1.
     sc = scenario_fn if scenario_fn is not None else make_1v1_pistol_flame
+    AgentCls = (agent_mod.HybridGreedyAgent if model_kind == "hybrid"
+                  else agent_mod.GreedyVAgent)
     for k in range(n_fights):
         is_cand_team1 = (k < half)
         eng = sc(seed=seed_base + k)
-        ag_cand = agent_mod.GreedyVAgent(
+        ag_cand = AgentCls(
             candidate, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
             temperature=eval_temperature, epsilon=0.0,
             rng=np.random.default_rng(seed_base + k))
-        ag_opp = agent_mod.GreedyVAgent(
+        ag_opp = AgentCls(
             opponent, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
             temperature=eval_temperature, epsilon=0.0,
             rng=np.random.default_rng(seed_base + k + 1_000_000_000))
@@ -309,6 +357,9 @@ def main():
                     choices=list(SCENARIOS.keys()),
                     help="curriculum stage: stage1 (fixed map) or "
                          "stage2 (random spawn + obstacles)")
+    p.add_argument("--model",     default="mlp", choices=["mlp", "hybrid"],
+                    help="V-network architecture: mlp (entity-only "
+                         "256-d) or hybrid (CNN spatial + entity MLP)")
     args = p.parse_args()
 
     cfg = Config(
@@ -320,9 +371,11 @@ def main():
         buffer_capacity=args.buffer,
         pool_refresh_every=args.pool_refresh_every,
         scenario=args.scenario,
+        model_kind=args.model,
     )
     scenario_path, scenario_fn = SCENARIOS[cfg.scenario]
     print(f"[trainer] scenario = {cfg.scenario} -> {scenario_path}")
+    print(f"[trainer] model    = {cfg.model_kind}")
     out = Path(cfg.out_dir).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "meta.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -333,15 +386,18 @@ def main():
     seed_all(cfg.seed_base)
 
     # Best (held) and candidate (training) models.
-    best_model = load_or_init_model(best_path)
-    cand_model = MLPv1()
+    best_model = load_or_init_model(best_path, kind=cfg.model_kind)
+    cand_model = make_model(cfg.model_kind)
     cand_model.load_state_dict(best_model.state_dict())
 
     optimizer = torch.optim.AdamW(cand_model.parameters(),
                                     lr=cfg.learning_rate,
                                     weight_decay=cfg.weight_decay)
 
-    buffer = ReplayBuffer(capacity=cfg.buffer_capacity)
+    if cfg.model_kind == "hybrid":
+        buffer = HybridReplayBuffer(capacity=cfg.buffer_capacity)
+    else:
+        buffer = ReplayBuffer(capacity=cfg.buffer_capacity)
 
     # Optional parallel self-play. When n_workers>0 we keep a pool
     # alive across cycles and just refresh its weights via
@@ -350,7 +406,8 @@ def main():
     if cfg.n_workers > 0:
         parallel_sp = ParallelSelfPlay(
             n_workers=cfg.n_workers,
-            scenario_fn_path=scenario_path)
+            scenario_fn_path=scenario_path,
+            model_kind=cfg.model_kind)
         print(f"[trainer] parallel self-play with {cfg.n_workers} workers")
 
     cycle = 0
@@ -373,13 +430,22 @@ def main():
                 parallel_sp, buffer, cfg.fights_per_cycle,
                 seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle)
         else:
-            agent = agent_mod.GreedyVAgent(
-                cand_model, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
-                temperature=cfg.temperature, epsilon=eps)
-            sp_stats = collect_self_play(
-                agent, buffer, cfg.fights_per_cycle,
-                seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle,
-                scenario_fn=scenario_fn)
+            if cfg.model_kind == "hybrid":
+                agent = agent_mod.HybridGreedyAgent(
+                    cand_model, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
+                    temperature=cfg.temperature, epsilon=eps)
+                sp_stats = collect_self_play_hybrid(
+                    agent, buffer, cfg.fights_per_cycle,
+                    seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle,
+                    scenario_fn=scenario_fn)
+            else:
+                agent = agent_mod.GreedyVAgent(
+                    cand_model, weapons=[WEAPON_PISTOL], chips=[CHIP_FLAME],
+                    temperature=cfg.temperature, epsilon=eps)
+                sp_stats = collect_self_play(
+                    agent, buffer, cfg.fights_per_cycle,
+                    seed_base=cfg.seed_base + cycle * cfg.fights_per_cycle,
+                    scenario_fn=scenario_fn)
 
         tr = train_steps(
             cand_model, optimizer, buffer,
@@ -396,11 +462,12 @@ def main():
 
         if cfg.eval_every > 0 and cycle > 0 and cycle % cfg.eval_every == 0:
             ev = eval_match(cand_model, best_model, cfg.eval_fights,
-                              scenario_fn=scenario_fn)
+                              scenario_fn=scenario_fn,
+                              model_kind=cfg.model_kind)
             record["eval"] = ev
             if ev["win_rate"] >= cfg.eval_promote_threshold:
                 save_model(cand_model, best_path)
-                best_model = MLPv1()
+                best_model = make_model(cfg.model_kind)
                 best_model.load_state_dict(cand_model.state_dict())
                 record["promoted"] = True
             else:

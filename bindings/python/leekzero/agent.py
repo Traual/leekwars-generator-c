@@ -286,3 +286,115 @@ def build_callback(agent: GreedyVAgent):
 # level so build_callback can refer to it without late-binding
 # games.
 _callback_engine = None
+
+
+# ============================================================ Hybrid agent ==
+
+
+# Constants from lw_features.h, hardcoded here so we don't import
+# the engine just for a tuple of ints.
+_SPATIAL_C = 4
+_SPATIAL_H = 18
+_SPATIAL_W = 35
+_SPATIAL_TOTAL = _SPATIAL_C * _SPATIAL_H * _SPATIAL_W
+
+
+class HybridGreedyAgent:
+    """V-guided greedy agent for the HybridV1 network.
+
+    Same selection logic as ``GreedyVAgent`` but the network takes
+    BOTH a spatial tensor (4, 18, 35) and the 256-d entity feature
+    buffer. The agent extracts both per candidate and feeds them
+    batched to ``model.forward(spatial, entity)``.
+    """
+
+    def __init__(self, model, weapons: Sequence[int],
+                  chips: Sequence[int],
+                  *,
+                  feature_dim: int = 256,
+                  spatial_shape: tuple = (_SPATIAL_C, _SPATIAL_H, _SPATIAL_W),
+                  max_actions_per_turn: int = 32,
+                  device: str = "cpu",
+                  temperature: float = 0.0,
+                  epsilon: float = 0.0,
+                  rng: Optional[np.random.Generator] = None):
+        self.model = model.to(device).eval()
+        self.weapons = list(weapons)
+        self.chips = list(chips)
+        self.feature_dim = feature_dim
+        self.spatial_shape = tuple(spatial_shape)
+        self.max_actions_per_turn = max_actions_per_turn
+        self.device = device
+        self.temperature = float(temperature)
+        self.epsilon = float(epsilon)
+        self.rng = rng if rng is not None else np.random.default_rng()
+        self.action_prior: dict[int, float] = {
+            END_TURN:    -0.30,
+            MOVE_TOWARD:  0.00,
+            CAST:         0.10,
+            FIRE:         0.20,
+        }
+
+    @torch.no_grad()
+    def _score_candidates(self, eng, idx: int,
+                            candidates: List[Action]) -> np.ndarray:
+        K = len(candidates)
+        # Two parallel buffers: entity (K, 256) + spatial (K, C*H*W)
+        # which we reshape to (K, C, H, W) for the conv branch.
+        ent  = np.zeros((K, self.feature_dim), dtype=np.float32)
+        spat = np.zeros((K, _SPATIAL_TOTAL),    dtype=np.float32)
+        illegal = [False] * K
+
+        for i, a in enumerate(candidates):
+            if a.verb == END_TURN:
+                eng.extract_v_features(idx, ent[i])
+                eng.extract_spatial_features(idx, spat[i])
+                continue
+            c = eng.clone()
+            rc = apply_action(c, idx, a)
+            if rc <= 0:
+                illegal[i] = True
+                eng.extract_v_features(idx, ent[i])
+                eng.extract_spatial_features(idx, spat[i])
+                continue
+            c.extract_v_features(idx, ent[i])
+            c.extract_spatial_features(idx, spat[i])
+
+        spat_t = torch.from_numpy(spat).reshape(K, _SPATIAL_C, _SPATIAL_H, _SPATIAL_W).to(self.device)
+        ent_t  = torch.from_numpy(ent).to(self.device)
+        v = self.model(spat_t, ent_t).detach().cpu().numpy().astype(np.float32, copy=False)
+
+        for i, a in enumerate(candidates):
+            if illegal[i]:
+                v[i] = -1e6
+            else:
+                v[i] += self.action_prior.get(a.verb, 0.0)
+        return v
+
+    def _select(self, candidates: List[Action], values: np.ndarray) -> int:
+        if self.epsilon > 0.0 and self.rng.random() < self.epsilon:
+            non_end = [i for i, a in enumerate(candidates) if a.verb != END_TURN]
+            if non_end:
+                return int(self.rng.choice(non_end))
+        if self.temperature <= 0.0:
+            return int(np.argmax(values))
+        scaled = values / max(self.temperature, 1e-6)
+        scaled -= scaled.max()
+        probs = np.exp(scaled, dtype=np.float64)
+        probs /= probs.sum()
+        return int(self.rng.choice(len(candidates), p=probs))
+
+    def play_turn(self, eng, idx: int, turn: int) -> int:
+        applied = 0
+        while applied < self.max_actions_per_turn:
+            candidates = enumerate_candidates(
+                eng, idx, self.weapons, self.chips)
+            if not candidates: break
+            values = self._score_candidates(eng, idx, candidates)
+            best = self._select(candidates, values)
+            chosen = candidates[best]
+            if chosen.verb == END_TURN: break
+            rc = apply_action(eng, idx, chosen)
+            if rc <= 0: break
+            applied += 1
+        return applied

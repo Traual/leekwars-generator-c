@@ -45,7 +45,8 @@ _W_TORCH_THREADS = 1
 
 def _worker_init(model_state_dict, weapons, chips,
                   temperature, epsilon, action_prior,
-                  scenario_fn_path, torch_threads):
+                  scenario_fn_path, torch_threads,
+                  model_kind="mlp"):
     """Pool initializer: build the per-worker agent + scenario factory.
 
     ``scenario_fn_path`` is a "module:attribute" string instead of a
@@ -70,21 +71,34 @@ def _worker_init(model_state_dict, weapons, chips,
     torch.set_num_threads(int(torch_threads))
     _W_TORCH_THREADS = int(torch_threads)
 
-    from leekzero.model import MLPv1
+    from leekzero.model import MLPv1, HybridV1
     from leekzero import agent as agent_mod
 
-    model = MLPv1()
+    if model_kind == "hybrid":
+        model = HybridV1()
+    else:
+        model = MLPv1()
     model.load_state_dict(model_state_dict)
     model.eval()
 
-    ag = agent_mod.GreedyVAgent(
-        model,
-        weapons=list(weapons),
-        chips=list(chips),
-        temperature=float(temperature),
-        epsilon=float(epsilon),
-        rng=np.random.default_rng(os.getpid()),  # different seed per worker
-    )
+    if model_kind == "hybrid":
+        ag = agent_mod.HybridGreedyAgent(
+            model,
+            weapons=list(weapons),
+            chips=list(chips),
+            temperature=float(temperature),
+            epsilon=float(epsilon),
+            rng=np.random.default_rng(os.getpid()),
+        )
+    else:
+        ag = agent_mod.GreedyVAgent(
+            model,
+            weapons=list(weapons),
+            chips=list(chips),
+            temperature=float(temperature),
+            epsilon=float(epsilon),
+            rng=np.random.default_rng(os.getpid()),
+        )
     if action_prior is not None:
         ag.action_prior = dict(action_prior)
     _W_AGENT = ag
@@ -96,16 +110,21 @@ def _worker_init(model_state_dict, weapons, chips,
 
 
 def _worker_play_one(seed):
-    """Worker entry point: play one fight and return the samples.
-
-    Imports happen inside the function so the parent process doesn't
-    pay the import cost on workers it never spawns. _W_AGENT and
-    _W_SCENARIO_FN are set by ``_worker_init`` above.
-    """
+    """Worker entry point (MLP / entity-only model): play one fight
+    and return (states, labels, winner)."""
     from leekzero.selfplay import play_one_fight
     states, labels, winner = play_one_fight(
         _W_AGENT, scenario=_W_SCENARIO_FN, seed=int(seed))
     return states, labels, winner
+
+
+def _worker_play_one_hybrid(seed):
+    """Worker entry point for the Hybrid model: returns
+    (entity_states, spatial_states, labels, winner)."""
+    from leekzero.selfplay import play_one_fight_hybrid
+    ent, spt, labels, winner = play_one_fight_hybrid(
+        _W_AGENT, scenario=_W_SCENARIO_FN, seed=int(seed))
+    return ent, spt, labels, winner
 
 
 class ParallelSelfPlay:
@@ -116,10 +135,12 @@ class ParallelSelfPlay:
 
     def __init__(self, n_workers: int = 8,
                   scenario_fn_path: str = "leekzero.selfplay:make_1v1_pistol_flame",
-                  torch_threads: int = 1):
+                  torch_threads: int = 1,
+                  model_kind: str = "mlp"):
         self.n_workers = int(n_workers)
         self.scenario_fn_path = scenario_fn_path
         self.torch_threads = int(torch_threads)
+        self.model_kind = model_kind
         self._pool: Optional[mp.pool.Pool] = None
         # Args that get baked into the pool initializer:
         self._init_args: Optional[tuple] = None
@@ -147,6 +168,7 @@ class ParallelSelfPlay:
             None if action_prior is None else dict(action_prior),
             self.scenario_fn_path,
             self.torch_threads,
+            self.model_kind,
         )
         # On Windows, ``spawn`` is the default start method. We force
         # it explicitly so behavior is identical on Linux too.
@@ -159,13 +181,34 @@ class ParallelSelfPlay:
 
     def play_batch(self, n_fights: int, seed_base: int = 0) -> tuple:
         """Run ``n_fights`` fights across the worker pool. Returns
-        (concat_states, concat_labels, list_of_winners).
+        (states, labels, winners) for MLP, or (entity, spatial,
+        labels, winners) for Hybrid.
         """
         if self._pool is None:
             raise RuntimeError("set_model() must be called before play_batch")
         seeds = [seed_base + i for i in range(n_fights)]
-        # imap_unordered streams results as workers finish, which keeps
-        # the main process's memory footprint flat.
+
+        if self.model_kind == "hybrid":
+            ent_chunks = []
+            spt_chunks = []
+            lab_chunks = []
+            winners: list[int] = []
+            for ent, spt, labels, winner in self._pool.imap_unordered(
+                    _worker_play_one_hybrid, seeds, chunksize=4):
+                ent_chunks.append(ent)
+                spt_chunks.append(spt)
+                lab_chunks.append(labels)
+                winners.append(int(winner))
+            if not ent_chunks:
+                return (np.zeros((0, 256), dtype=np.float32),
+                        np.zeros((0, 4, 18, 35), dtype=np.float32),
+                        np.zeros((0,), dtype=np.float32), [])
+            return (np.concatenate(ent_chunks, axis=0),
+                    np.concatenate(spt_chunks, axis=0),
+                    np.concatenate(lab_chunks, axis=0),
+                    winners)
+
+        # MLP / entity-only path.
         all_states = []
         all_labels = []
         winners: list[int] = []

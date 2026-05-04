@@ -186,6 +186,145 @@ def play_one_fight(agent: agent_mod.GreedyVAgent,
     return states, labels, winner
 
 
+# ============================================== self-play (hybrid model) ==
+
+
+# Spatial tensor shape; mirrors lw_features.h.
+SPATIAL_SHAPE = (4, 18, 35)
+SPATIAL_TOTAL = 4 * 18 * 35   # 2520
+
+
+def play_one_fight_hybrid(agent,
+                            scenario: callable = make_1v1_pistol_flame,
+                            seed: int = 1,
+                            label_mode: str = "margin"):
+    """Hybrid variant of ``play_one_fight``: also captures the
+    spatial tensor at each callback. Returns (entity_states,
+    spatial_states, labels, winner).
+
+    The spatial array is shape (N, C, H, W) ready to feed into
+    HybridV1 after ``torch.from_numpy``.
+    """
+    eng = scenario(seed)
+    agent_mod._callback_engine = eng
+
+    captured_ent: list[np.ndarray] = []
+    captured_spt: list[np.ndarray] = []
+    captured_teams: list[int] = []
+
+    n_ent_initial = eng.n_entities()
+    initial_life: dict[int, int] = {}
+    for i in range(n_ent_initial):
+        team = eng.entity_team(i)
+        initial_life[team] = initial_life.get(team, 0) + eng.entity_hp(i)
+
+    def cb(idx: int, turn: int) -> int:
+        e = np.zeros(FEATURE_DIM, dtype=np.float32)
+        s = np.zeros(SPATIAL_TOTAL, dtype=np.float32)
+        eng.extract_v_features(idx, e)
+        eng.extract_spatial_features(idx, s)
+        captured_ent.append(e)
+        captured_spt.append(s)
+        captured_teams.append(eng.entity_team(idx))
+        return agent.play_turn(eng, idx, turn)
+
+    eng.set_ai_callback(cb)
+    eng.run()
+
+    winner = int(eng.winner)
+    n = len(captured_ent)
+    ent_arr = np.zeros((n, FEATURE_DIM), dtype=np.float32) if n else np.zeros((0, FEATURE_DIM), dtype=np.float32)
+    spt_arr = np.zeros((n, *SPATIAL_SHAPE), dtype=np.float32) if n else np.zeros((0, *SPATIAL_SHAPE), dtype=np.float32)
+    labels  = np.zeros(n, dtype=np.float32)
+
+    if label_mode == "margin":
+        final_life: dict[int, int] = {}
+        for i in range(eng.n_entities()):
+            t = eng.entity_team(i)
+            if eng.entity_alive(i):
+                final_life[t] = final_life.get(t, 0) + eng.entity_hp(i)
+            else:
+                final_life.setdefault(t, 0)
+        total_initial = max(sum(initial_life.values()), 1)
+        for i in range(n):
+            ent_arr[i] = captured_ent[i]
+            spt_arr[i] = captured_spt[i].reshape(SPATIAL_SHAPE)
+            team = captured_teams[i]
+            my_final  = final_life.get(team, 0)
+            enemy_final = sum(v for t, v in final_life.items() if t != team)
+            margin = (my_final - enemy_final) / total_initial
+            labels[i] = float(max(-1.0, min(1.0, margin)))
+    else:
+        for i in range(n):
+            ent_arr[i] = captured_ent[i]
+            spt_arr[i] = captured_spt[i].reshape(SPATIAL_SHAPE)
+            team = captured_teams[i]
+            if winner == -1:
+                labels[i] = 0.0
+            elif team == winner:
+                labels[i] = 1.0
+            else:
+                labels[i] = -1.0
+    return ent_arr, spt_arr, labels, winner
+
+
+class HybridReplayBuffer:
+    """Replay buffer for the Hybrid network: stores both spatial and
+    entity tensors. Default capacity 100K samples ~= 1 GB
+    (mostly the spatial tensor at 10 KB/sample). Tune with the
+    ``capacity`` arg.
+    """
+
+    def __init__(self, capacity: int = 100_000,
+                  feature_dim: int = FEATURE_DIM,
+                  spatial_shape: tuple = SPATIAL_SHAPE,
+                  rng: Optional[np.random.Generator] = None):
+        self.capacity = capacity
+        self.feature_dim = feature_dim
+        self.spatial_shape = spatial_shape
+        self.entity = np.zeros((capacity, feature_dim), dtype=np.float32)
+        self.spatial = np.zeros((capacity, *spatial_shape), dtype=np.float32)
+        self.labels  = np.zeros(capacity, dtype=np.float32)
+        self.write = 0
+        self.size = 0
+        self.rng = rng if rng is not None else np.random.default_rng()
+
+    def push(self, entity: np.ndarray, spatial: np.ndarray,
+              labels: np.ndarray) -> None:
+        n = entity.shape[0]
+        if n == 0: return
+        if n >= self.capacity:
+            entity  = entity[-self.capacity:]
+            spatial = spatial[-self.capacity:]
+            labels  = labels[-self.capacity:]
+            n = self.capacity
+        end = self.write + n
+        if end <= self.capacity:
+            self.entity[self.write:end] = entity
+            self.spatial[self.write:end] = spatial
+            self.labels[self.write:end] = labels
+        else:
+            head = self.capacity - self.write
+            self.entity[self.write:self.capacity] = entity[:head]
+            self.spatial[self.write:self.capacity] = spatial[:head]
+            self.labels[self.write:self.capacity] = labels[:head]
+            tail = n - head
+            self.entity[:tail] = entity[head:]
+            self.spatial[:tail] = spatial[head:]
+            self.labels[:tail] = labels[head:]
+        self.write = end % self.capacity
+        self.size = min(self.capacity, self.size + n)
+
+    def sample(self, batch_size: int):
+        if self.size == 0:
+            raise ValueError("replay buffer is empty")
+        idx = self.rng.integers(0, self.size, size=batch_size)
+        return self.entity[idx], self.spatial[idx], self.labels[idx]
+
+    def __len__(self) -> int:
+        return self.size
+
+
 # =========================================================== replay buf ==
 
 
